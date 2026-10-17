@@ -1,5 +1,5 @@
 services:
-  app:
+  rag:
     build: .
     restart: unless-stopped
     environment:
