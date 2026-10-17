@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>RAG Local</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>#workspace.hidden{display:none}</style>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+  <header class="sticky top-0 z-10 border-b border-slate-800 bg-slate-900/95 backdrop-blur">
+    <div class="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-6">
+      <a href="/" class="text-lg font-bold tracking-tight text-indigo-400 sm:text-xl">✦ RAG Local</a>
+      <span id="ollama" class="text-xs text-slate-400 sm:text-sm">Verificando Ollama…</span>
+    </div>
+  </header>
+
+  <main id="home" class="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 sm:py-10">
+    <div class="mb-6 flex flex-col gap-4 sm:mb-8 sm:flex-row sm:items-end sm:justify-between">
+      <div><h1 class="text-2xl font-bold sm:text-3xl">Seus notebooks</h1><p class="mt-2 text-sm text-slate-400 sm:text-base">Bases de conhecimento privadas e independentes.</p></div>
+      <button id="newNotebook" class="w-full rounded-lg bg-indigo-600 px-4 py-2.5 font-medium hover:bg-indigo-500 sm:w-auto">＋ Criar notebook</button>
+    </div>
+    <div id="notebooks" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3"></div>
+  </main>
+
+  <main id="workspace" class="mx-auto hidden max-w-[1600px] px-3 pb-4 sm:px-6 sm:pb-6 xl:flex xl:h-[calc(100dvh-57px)] xl:flex-col xl:overflow-hidden">
+    <div class="flex items-start gap-3 py-4 sm:py-5">
+      <button id="back" class="shrink-0 rounded-lg border border-slate-800 px-3 py-2 text-sm text-indigo-300 hover:bg-slate-900">← <span class="hidden sm:inline">Notebooks</span></button>
+      <div class="min-w-0"><h1 id="bookTitle" class="break-words text-lg font-bold sm:text-xl"></h1><p id="bookDescription" class="mt-1 break-words text-sm text-slate-400"></p></div>
+    </div>
+    <div class="grid min-h-[calc(100vh-130px)] gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(250px,300px)_minmax(0,1fr)_minmax(210px,250px)]">
+      <aside class="min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-4">
+        <div class="mb-3 flex items-center justify-between gap-2"><h2 class="font-semibold">Documentos</h2><span class="text-xs text-slate-500">PDF, DOCX, XLSX…</span></div>
+        <div class="mb-4 grid grid-cols-2 gap-2">
+          <button id="addFile" class="rounded-lg bg-indigo-600 px-3 py-2.5 text-sm font-medium hover:bg-indigo-500">Adicionar arquivo</button>
+          <button id="addText" class="rounded-lg border border-slate-700 px-3 py-2.5 text-sm hover:bg-slate-800">Adicionar texto</button>
+        </div>
+        <input id="fileInput" type="file" accept=".pdf,.docx,.xlsx,.xls,.csv,.txt,.md" class="hidden">
+        <div id="documents" class="space-y-2"></div>
+      </aside>
+
+      <section class="flex h-[65vh] min-h-[420px] min-w-0 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900 xl:h-auto xl:min-h-0">
+        <div class="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3"><span class="font-semibold">Conversa</span><button id="newChat" class="shrink-0 rounded-lg px-3 py-2 text-sm font-medium text-indigo-300 hover:bg-slate-800">＋ Nova conversa</button></div>
+        <div id="messages" class="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain scroll-smooth p-3 sm:p-5"></div>
+        <form id="askForm" class="flex gap-2 border-t border-slate-800 p-3 sm:p-4">
+          <input id="question" class="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-3 text-sm placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-600 sm:text-base" placeholder="Pergunte sobre os documentos…" maxlength="5000" required>
+          <button class="rounded-lg bg-indigo-600 px-4 font-medium hover:bg-indigo-500 sm:px-5">Enviar</button>
+        </form>
+      </section>
+
+      <aside class="min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-4">
+        <div class="mb-3 flex items-center justify-between"><h2 class="font-semibold">Conversas</h2><span class="text-xs text-slate-500">Recentes</span></div>
+        <div id="chatList" class="max-h-48 space-y-1 overflow-auto xl:max-h-[35vh]"></div>
+        <div class="mb-3 mt-6 flex items-center justify-between border-t border-slate-800 pt-4"><h2 class="font-semibold">Mensagens salvas</h2></div>
+        <div id="savedList" class="max-h-64 space-y-2 overflow-auto xl:max-h-[calc(65vh-180px)]"></div>
+      </aside>
+    </div>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>
