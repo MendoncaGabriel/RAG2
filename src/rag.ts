@@ -70,9 +70,10 @@ export async function ask(notebookId: string, question: string) {
   }
   const context = contextParts.join("\n\n");
   const result = await ollama("/api/chat", { model: process.env.OLLAMA_CHAT_MODEL || "qwen2.5:1.5b-instruct", stream: false, keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m", options: { temperature: 0.1, top_p: 0.8, num_ctx: Math.max(2048, Number(process.env.OLLAMA_NUM_CTX) || 4096), num_predict: Math.max(128, Number(process.env.OLLAMA_NUM_PREDICT) || 512) }, messages: [
-    { role: "system", content: "Responda em português claro e direto. Use somente o CONTEXTO; não invente nem use conhecimento externo. Se a informação não estiver nos trechos, diga isso. Combine trechos relevantes e cite as evidências como [Fonte 1]. Para resumo, priorize os pontos principais em poucos tópicos." },
+    { role: "system", content: "Responda em português claro e direto. Use somente o CONTEXTO; não invente nem use conhecimento externo. Se a informação não estiver nos trechos, diga isso. Não inclua citações, referências a fontes nem marcadores como [Fonte 1] na resposta; as fontes serão exibidas separadamente. Para resumo, priorize os pontos principais em poucos tópicos." },
     { role: "user", content: `CONTEXTO:\n${context}\n\nPERGUNTA:\n${question}` }
   ] });
-  return { answer: result.message?.content || "O modelo não retornou resposta.", sources: scored.map((s,i)=>({ id:s.id, document:s.document_name, excerpt:s.content.slice(0,320), score:Number(s.score.toFixed(4)), label:`Fonte ${i+1}` })) };
+  const answer = String(result.message?.content || "O modelo não retornou resposta.").replace(/\s*\[Fonte\s+\d+[^\]]*\]/gi, "").replace(/[ \t]{2,}/g, " ").trim();
+  return { answer, sources: scored.map((s,i)=>({ id:s.id, document:s.document_name, excerpt:s.content.slice(0,320), score:Number(s.score.toFixed(4)), label:`Fonte ${i+1}` })) };
 }
 export const uuid = () => crypto.randomUUID();
