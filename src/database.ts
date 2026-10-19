@@ -20,3 +20,5 @@ CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, conversation_id TEXT NO
 CREATE TABLE IF NOT EXISTS saved_messages(id TEXT PRIMARY KEY, notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE, message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 `);
 try { db.exec("ALTER TABLE documents ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE saved_messages ADD COLUMN embedding BLOB"); } catch {}
+try { db.exec("ALTER TABLE saved_messages ADD COLUMN dimensions INTEGER"); } catch {}
