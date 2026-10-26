@@ -49,7 +49,7 @@ if (base) {
   log("ATENÇÃO: Ollama não encontrado. Confirme que ele está em execução no host.");
   log("  Linux: use 'docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build'");
   log("         ou inicie o Ollama com OLLAMA_HOST=0.0.0.0.");
-  process.env.OLLAMA_BASE_URL ||= "http://host.docker.internal:11434";
+  process.env.OLLAMA_BASE_URL = "http://host.docker.internal:11434";
 }
 
 await import("../dist/server.js");
