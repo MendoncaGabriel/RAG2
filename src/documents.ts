@@ -164,6 +164,33 @@ async function processDocumentNow(id: string, notebookId: string, filePath: stri
   }
 }
 
+// Refaz só os embeddings dos trechos já salvos (sem reextrair o arquivo), p.ex. ao trocar o modelo de embeddings.
+export async function reindexDocument(id: string) {
+  const chunks = db.prepare("SELECT id,content FROM chunks WHERE document_id=? ORDER BY chunk_index").all(id) as { id: string; content: string }[];
+  if (!chunks.length) return;
+  db.prepare("UPDATE documents SET status='processing',progress=2,error=NULL WHERE id=?").run(id);
+  try {
+    const vectors: { id: string; blob: Buffer; dims: number }[] = [];
+    for (let i = 0; i < chunks.length; i += 32) {
+      if (!db.prepare("SELECT 1 FROM documents WHERE id=?").get(id)) return;
+      const batch = await embedMany(chunks.slice(i, i + 32).map(c => c.content));
+      batch.forEach((v, k) => vectors.push({ id: chunks[i + k].id, blob: Buffer.from(new Float32Array(v).buffer), dims: v.length }));
+      db.prepare("UPDATE documents SET progress=? WHERE id=?").run(2 + Math.round(vectors.length / chunks.length * 96), id);
+    }
+    if (new Set(vectors.map(v => v.dims)).size !== 1) throw new Error("Dimensão de embedding inconsistente.");
+    const update = db.prepare("UPDATE chunks SET embedding=?,dimensions=? WHERE id=?");
+    db.exec("BEGIN");
+    try {
+      for (const v of vectors) update.run(v.blob, v.dims, v.id);
+      db.prepare("UPDATE documents SET status='processed',progress=100,error=NULL WHERE id=?").run(id);
+      db.exec("COMMIT");
+    } catch (error) { db.exec("ROLLBACK"); throw error; }
+  } catch (e) {
+    db.prepare("UPDATE documents SET status='failed',error=? WHERE id=?").run(`Falha ao reindexar: ${e instanceof Error ? e.message : String(e)}`, id);
+    throw e;
+  }
+}
+
 export async function removeDocument(id: string) {
   const doc = db.prepare("SELECT path FROM documents WHERE id=?").get(id) as { path: string | null } | undefined;
   if (!doc) return false;

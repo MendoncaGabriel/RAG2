@@ -1,32 +1,30 @@
 # RAG Local
 
-Aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e Ollama. Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
+Aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e provedores de IA configuráveis (Ollama, OpenAI e compatíveis, Google Gemini, Anthropic). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
 
 ## Requisitos
 
 - Node.js 22.13 ou superior e npm.
-- Ollama instalado e em execução (`ollama serve`, se não iniciar como serviço).
+- Um provedor de IA: Ollama local (`ollama serve`) ou uma chave de API (OpenAI, Gemini, Anthropic, Groq, OpenRouter…).
 - Espaço em disco para o SQLite e arquivos enviados.
 
 ## Instalação e execução
 
 ```bash
 npm install
-ollama pull qwen2.5:1.5b-instruct
-ollama pull bge-m3
 ```
 
-Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`) e ajuste se necessário. Os modelos não são baixados pela aplicação. Inicie com:
+Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`) e ajuste se necessário. Inicie com:
 
 ```bash
 npm run dev
 ```
 
-Acesse http://localhost:3000. Para verificar a compilação TypeScript: `npm run typecheck`. Para gerar a versão de produção e executá-la localmente: `npm run build` e `npm start`.
+Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) para cadastrar a IA — veja a seção abaixo. Para verificar a compilação TypeScript: `npm run typecheck`. Para gerar a versão de produção e executá-la localmente: `npm run build` e `npm start`.
 
 ### Docker Compose
 
-O app roda só dentro do Docker, na porta interna 3000, **sem publicar porta** no host, e usa o **Ollama já instalado no host** (o Compose não sobe Ollama). A rede `app_net` é externa e precisa existir:
+O app roda só dentro do Docker, na porta interna 3000, **sem publicar porta** no host (o Compose não sobe nenhuma IA; use a tela de Configurações). A rede `app_net` é externa e precisa existir:
 
 ```bash
 docker network create app_net   # uma única vez
@@ -34,17 +32,17 @@ docker network create app_net   # uma única vez
 # Windows / macOS (Docker Desktop)
 docker compose up -d --build
 
-# Servidor Linux (Ollama escutando só em 127.0.0.1, o padrão)
+# Servidor Linux com IA local escutando só em 127.0.0.1
 docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 ```
 
-Conecte um proxy (nginx, Caddy, Traefik…) à rede `app_net` apontando para `rag:3000`. Ao iniciar, o container localiza o Ollama do host e baixa os modelos configurados que faltarem (`OLLAMA_AUTO_PULL=false` desativa). Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
+Conecte um proxy (nginx, Caddy, Traefik…) à rede `app_net` apontando para `rag:3000`. Para usar um Ollama do host, cadastre-o com a URL `http://host.docker.internal:11434`. Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
 
-No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode: host`), então `app_net` e o nome `rag` não se aplicam: o app fica em `localhost:3000` do servidor. Alternativa sem esse arquivo: iniciar o Ollama com `OLLAMA_HOST=0.0.0.0`. O arquivo exige Docker Compose 2.24+.
+No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode: host`), então `app_net` e o nome `rag` não se aplicam: o app fica em `localhost:3000` do servidor. Nesse modo cadastre o Ollama como `http://127.0.0.1:11434`. Alternativa sem esse arquivo: iniciar o Ollama com `OLLAMA_HOST=0.0.0.0`. O arquivo exige Docker Compose 2.24+.
 
 ## Configuração
 
-`OLLAMA_BASE_URL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_EMBEDDING_MODEL`, `DATABASE_PATH`, `UPLOAD_DIR`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `OLLAMA_NUM_CTX`, `OLLAMA_NUM_PREDICT`, `OLLAMA_KEEP_ALIVE` e `DOCUMENT_PROCESS_CONCURRENCY` são lidos do ambiente. O modelo de embeddings padrão é `bge-m3`, que permite recuperação multilíngue entre português e inglês. Para servidor limitado, comece com `CHUNK_SIZE=700`, `CHUNK_OVERLAP=100`, `RETRIEVAL_TOP_K=4`, `MIN_RELEVANCE_SCORE=0.18`, `MAX_CONTEXT_CHARS=7000`, `OLLAMA_NUM_CTX=4096`, `OLLAMA_NUM_PREDICT=384`, `OLLAMA_KEEP_ALIVE=5m` e `DOCUMENT_PROCESS_CONCURRENCY=1`. O processamento sequencial evita cargas simultâneas de OCR/embeddings e picos de memória; pode ser elevado a `2` para mais vazão se houver memória disponível. Menos contexto/resposta reduz RAM e latência; se respostas não recuperarem evidências suficientes, reduza `MIN_RELEVANCE_SCORE` ou aumente `MAX_CONTEXT_CHARS`/`RETRIEVAL_TOP_K`. A recuperação combina similaridade semântica com correspondência de termos exatos e percorre os vetores incrementalmente para manter o uso de memória limitado. Use sempre o mesmo modelo de embeddings para indexar e consultar; trocar modelo exige reprocessar todos os documentos já indexados. Diretórios e banco são criados localmente. Para trocar as configurações, pare o servidor antes de copiar/editar `.env`.
+`DATABASE_PATH`, `UPLOAD_DIR`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `CHAT_MAX_TOKENS` e `DOCUMENT_PROCESS_CONCURRENCY` são lidos do ambiente. Modelos e provedores não vêm do ambiente: são cadastrados na tela de Configurações. Para recuperação multilíngue português/inglês, `bge-m3` (Ollama) é uma boa escolha. Para servidor limitado, comece com `CHUNK_SIZE=700`, `CHUNK_OVERLAP=100`, `RETRIEVAL_TOP_K=4`, `MIN_RELEVANCE_SCORE=0.18`, `MAX_CONTEXT_CHARS=7000`, `CHAT_MAX_TOKENS=384` e `DOCUMENT_PROCESS_CONCURRENCY=1`. O processamento sequencial evita cargas simultâneas de OCR/embeddings e picos de memória; pode ser elevado a `2` para mais vazão se houver memória disponível. Menos contexto/resposta reduz RAM e latência; se respostas não recuperarem evidências suficientes, reduza `MIN_RELEVANCE_SCORE` ou aumente `MAX_CONTEXT_CHARS`/`RETRIEVAL_TOP_K`. A recuperação combina similaridade semântica com correspondência de termos exatos e percorre os vetores incrementalmente para manter o uso de memória limitado. Use sempre o mesmo modelo de embeddings para indexar e consultar; trocar modelo exige reprocessar todos os documentos já indexados. Diretórios e banco são criados localmente. Para trocar as configurações, pare o servidor antes de copiar/editar `.env`.
 
 ## Uso
 
@@ -57,11 +55,27 @@ Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV
 - `POST /api/documents/:id/reprocess`, `DELETE /api/documents/:id`
 - `GET/POST /api/notebooks/:id/conversations`
 - `GET /api/conversations/:id/messages`, `POST /api/conversations/:id/messages` (`content`)
-- `GET /api/health/ollama`
+- `GET/POST /api/ai/providers`, `PUT/DELETE /api/ai/providers/:id`, `POST /api/ai/providers/:id/test`, `POST /api/ai/models`
+- `GET /api/ai/status`, `PUT /api/ai/active` (`{chat, embedding}` com ids de provedores)
 
 ## Notas
 
-OCR local de imagens é feito com Tesseract.js, pré-processando rotação, escala, contraste e nitidez. Português e inglês são reconhecidos juntos por padrão (`OCR_LANG=por+eng`; também aceita `por` ou `eng`). A recuperação e as respostas aceitam português e inglês; o idioma da resposta acompanha o idioma da pergunta. PDFs escaneados não são convertidos automaticamente para imagens e, portanto, precisam de OCR externo ou ser enviados como imagens. Os limites podem ser ajustados por `MAX_FILE_SIZE_MB` e o máximo de arquivos por envio é 50. Cada documento é indexado individualmente e cada busca consulta somente o notebook ativo; a conversa não injeta o histórico inteiro ao modelo, limitando o contexto para proteger máquinas modestas. O endpoint Ollama `/api/embed` requer uma versão atual do Ollama. Docker não é obrigatório: Node.js 22.13+ e Ollama podem rodar diretamente no servidor.
+OCR local de imagens é feito com Tesseract.js, pré-processando rotação, escala, contraste e nitidez. Português e inglês são reconhecidos juntos por padrão (`OCR_LANG=por+eng`; também aceita `por` ou `eng`). A recuperação e as respostas aceitam português e inglês; o idioma da resposta acompanha o idioma da pergunta. PDFs escaneados não são convertidos automaticamente para imagens e, portanto, precisam de OCR externo ou ser enviados como imagens. Os limites podem ser ajustados por `MAX_FILE_SIZE_MB` e o máximo de arquivos por envio é 50. Cada documento é indexado individualmente e cada busca consulta somente o notebook ativo; a conversa não injeta o histórico inteiro ao modelo, limitando o contexto para proteger máquinas modestas. Docker não é obrigatório: Node.js 22.13+ pode rodar diretamente no servidor.
+
+## Configurações de IA
+
+A tela **Configurações** (engrenagem no topo) cadastra, edita, lista e remove provedores de IA. Cada provedor tem nome, tipo, URL base, chave de API e modelos de chat e/ou embeddings:
+
+| Tipo | Serve para | URL base padrão |
+| --- | --- | --- |
+| Ollama | chat e embeddings locais | `http://localhost:11434` |
+| Compatível com OpenAI | OpenAI, Groq, OpenRouter, Together, LM Studio, vLLM, Azure e qualquer API `/chat/completions` | `https://api.openai.com/v1` |
+| Google Gemini | chat e embeddings | `https://generativelanguage.googleapis.com/v1beta` |
+| Anthropic (Claude) | só chat | `https://api.anthropic.com/v1` |
+
+Em **IA em uso** escolha qual provedor responde o chat e qual gera os embeddings (podem ser diferentes, ex.: chat no Claude e embeddings no Ollama). O botão **Buscar modelos** lista os modelos do provedor e **Testar** faz uma chamada real. As chaves ficam no SQLite do servidor e nunca são devolvidas ao navegador (só os 4 últimos caracteres).
+
+**Trocar o provedor/modelo de embeddings exige reprocessar os documentos e reindexar as mensagens salvas**, pois vetores de modelos diferentes não são comparáveis.
 
 ## Otimizações para modelos leves (1.5B)
 
@@ -70,7 +84,7 @@ OCR local de imagens é feito com Tesseract.js, pré-processando rotação, esca
 - **Memória de conversa**: os últimos turnos entram no prompt, e perguntas de acompanhamento ("e quando termina a fase 1 dele?") são reescritas como perguntas autônomas antes da busca.
 - **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" amostram trechos de todos os documentos em vez de buscar por similaridade.
 - **Precisão**: corte relativo de trechos fracos (< 80% do melhor), prompt mais curto e restritivo, `temperature=0.1` e `repeat_penalty`.
-- **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`, preenchido automaticamente em bases existentes) e `keep_alive=30m` também nos embeddings, evitando recarregar modelos entre embedding e chat.
+- **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`, preenchido automaticamente em bases existentes) e `keep_alive=30m` no Ollama, evitando recarregar modelos entre embedding e chat.
 
 ## Recuperação híbrida
 

@@ -20,7 +20,9 @@
     button{transition:transform .18s ease,background-color .18s ease,box-shadow .18s ease}button:hover{transform:translateY(-1px)}
     input{background:rgba(12,12,15,.8)!important;border-color:rgba(255,255,255,.14)!important;color:var(--ink)!important}
     #messages article{box-shadow:none}.ml-8{background:rgba(48,65,105,.48)!important;border-color:rgba(129,157,220,.2)!important}.mr-8{background:rgba(35,35,40,.82)!important}
-    #ollama{border:1px solid var(--line);background:rgba(35,35,40,.8);padding:7px 11px;border-radius:999px}
+    #aiStatus{border:1px solid var(--line);background:rgba(35,35,40,.8);padding:7px 11px;border-radius:999px}
+    select{background:rgba(12,12,15,.8)!important;border-color:rgba(255,255,255,.14)!important;color:var(--ink)!important}select option{background:#1c1c20;color:#f5f5f7}
+    #settings.hidden{display:none}
     .markdown-body{overflow-wrap:anywhere;line-height:1.65}.markdown-body>*+*{margin-top:.75em}.markdown-body h1,.markdown-body h2,.markdown-body h3{font-weight:700;line-height:1.3;margin-top:1.1em}.markdown-body h1{font-size:1.35em}.markdown-body h2{font-size:1.2em}.markdown-body h3{font-size:1.08em}.markdown-body ul,.markdown-body ol{padding-left:1.5em}.markdown-body ul{list-style:disc}.markdown-body ol{list-style:decimal}.markdown-body li+li{margin-top:.25em}.markdown-body blockquote{border-left:3px solid #6366f1;padding-left:.85em;color:#cbd5e1}.markdown-body pre{overflow-x:auto;border:1px solid var(--line);border-radius:.5rem;background:rgba(0,0,0,.3);padding:.85rem}.markdown-body code{border-radius:.25rem;background:rgba(0,0,0,.25);padding:.1em .3em;font-size:.9em}.markdown-body pre code{background:transparent;padding:0}.markdown-body a{color:#a5b4fc;text-decoration:underline}.markdown-body table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse}.markdown-body th,.markdown-body td{border:1px solid var(--line);padding:.4em .65em}.markdown-body hr{border-color:var(--line)}
     @media(max-width:1279px){#workspace{height:auto!important;overflow:visible!important}#workspace>.grid{grid-template-columns:minmax(0,1fr)!important}#workspace>.grid>section{grid-row:1;height:min(68vh,700px);min-height:420px}#workspace>.grid>aside{min-height:0}}
     @media(min-width:1280px){#workspace>.grid>aside{display:flex;min-height:0;flex-direction:column;overflow:hidden}}
@@ -33,7 +35,7 @@
   <header class="sticky top-0 z-10 border-b border-slate-800 bg-slate-900/95 backdrop-blur">
     <div class="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-6">
       <a href="/" class="flex items-center gap-2 text-lg font-semibold tracking-tight text-indigo-600 sm:text-xl"><i data-lucide="sparkles" class="h-5 w-5"></i>RAG</a>
-      <span id="ollama" class="text-xs text-slate-400 sm:text-sm">Verificando Ollama…</span>
+      <button id="aiStatus" class="flex items-center gap-2 text-xs text-slate-400 sm:text-sm" title="Abrir configurações de IA"><i data-lucide="settings" class="h-4 w-4"></i><span id="aiStatusText">Verificando IA…</span></button>
     </div>
   </header>
 
@@ -55,7 +57,7 @@
     </div>
     <div class="grid min-h-[calc(100vh-130px)] gap-4 xl:min-h-0 xl:flex-1 xl:grid-cols-[minmax(250px,300px)_minmax(0,1fr)_minmax(210px,250px)]">
       <aside class="min-w-0 rounded-xl border border-slate-800 bg-slate-900 p-4">
-        <div class="mb-3 flex items-center justify-between gap-2"><h2 class="font-semibold">Documentos</h2></div>
+        <div class="mb-3 flex items-center justify-between gap-2"><h2 class="font-semibold">Documentos</h2><button id="reindex" class="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 hover:bg-slate-800" title="Recalcula os vetores de todos os documentos e mensagens salvas com o modelo de embeddings atual"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Reindexar</button></div>
          <div id="dropZone" class="mb-3 rounded-xl border border-dashed border-slate-600 p-3 text-center transition-colors">
           <button id="addFile" class="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"><i data-lucide="upload" class="h-4 w-4"></i>Selecionar arquivo(s)</button>
           <p class="mt-2 text-xs text-slate-400">ou arraste um ou mais arquivos para cá</p>
@@ -84,6 +86,54 @@
       </aside>
     </div>
   </main>
+  <main id="settings" class="mx-auto hidden max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
+    <div class="mb-6 flex items-start gap-3">
+      <button id="settingsBack" class="flex shrink-0 items-center gap-2 rounded-xl border border-slate-800 px-3 py-2 text-sm text-indigo-600 hover:bg-slate-900"><i data-lucide="arrow-left" class="h-4 w-4"></i><span class="hidden sm:inline">Voltar</span></button>
+      <div><h1 class="text-2xl font-bold sm:text-3xl">Configurações de IA</h1><p class="mt-2 text-sm text-slate-400 sm:text-base">Cadastre os provedores de IA e escolha qual deles o sistema usa.</p></div>
+    </div>
+
+    <section class="mb-6 rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
+      <div class="mb-1 flex items-center gap-2"><i data-lucide="zap" class="h-4 w-4 text-indigo-400"></i><h2 class="font-semibold">IA em uso</h2><span id="activeSaved" class="text-xs text-emerald-400"></span></div>
+      <p class="mb-4 text-sm text-slate-400">O chat e os embeddings podem usar provedores diferentes.</p>
+      <div class="grid gap-4 sm:grid-cols-2">
+        <label class="block text-sm"><span class="mb-1 block font-medium">Chat <span class="font-normal text-slate-400">· gera as respostas</span></span><select id="activeChat" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
+        <label class="block text-sm"><span class="mb-1 block font-medium">Embeddings <span class="font-normal text-slate-400">· busca nos documentos</span></span><select id="activeEmbedding" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
+      </div>
+      <p class="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">Ao trocar o modelo de embeddings, abra um notebook e clique em <b>Reindexar</b> em Documentos: vetores de modelos diferentes não são comparáveis.</p>
+    </section>
+
+    <section class="rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
+      <div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-semibold">Provedores cadastrados</h2><p class="text-sm text-slate-400">Ollama, OpenAI e compatíveis, Gemini, Claude…</p></div><button id="addProvider" class="flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"><i data-lucide="plus" class="h-4 w-4"></i>Adicionar provedor</button></div>
+      <div id="providers" class="space-y-3"></div>
+    </section>
+  </main>
+
+  <dialog id="providerDialog" class="w-[min(94vw,560px)] max-h-[92vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/60">
+    <form id="providerForm" class="p-5 sm:p-6" autocomplete="off">
+      <div class="mb-1 text-xs font-semibold uppercase tracking-widest text-indigo-400">Provedor de IA</div>
+      <h2 id="providerTitle" class="text-xl font-semibold">Novo provedor</h2>
+      <div class="mt-5 space-y-4">
+        <label id="presetRow" class="block text-sm"><span class="mb-1 block font-medium">Começar de um modelo pronto</span><select id="pfPreset" class="w-full rounded-lg border px-3 py-2.5 text-sm"></select></label>
+        <label class="block text-sm"><span class="mb-1 block font-medium">Nome</span><input id="pfName" required maxlength="80" placeholder="Ex.: OpenAI trabalho" class="w-full rounded-lg border px-3 py-2.5 text-sm"></label>
+        <label class="block text-sm"><span class="mb-1 block font-medium">Tipo</span><select id="pfKind" class="w-full rounded-lg border px-3 py-2.5 text-sm"></select><span id="pfKindHint" class="mt-1 block text-xs text-slate-400"></span></label>
+        <label class="block text-sm"><span class="mb-1 block font-medium">URL base</span><input id="pfBaseUrl" required maxlength="300" class="w-full rounded-lg border px-3 py-2.5 font-mono text-sm"></label>
+        <div class="text-sm"><label for="pfKey" class="mb-1 block font-medium">Chave de API <span class="font-normal text-slate-400">· opcional para IA local</span></label>
+          <div class="flex gap-2"><input id="pfKey" type="password" maxlength="500" class="min-w-0 flex-1 rounded-lg border px-3 py-2.5 font-mono text-sm"><button type="button" id="pfKeyToggle" class="rounded-lg border border-slate-700 px-3 text-sm hover:bg-slate-800">Ver</button></div>
+          <label id="pfClearRow" class="mt-2 hidden items-center gap-2 text-xs text-slate-400"><input id="pfClear" type="checkbox" class="h-4 w-4"> Remover a chave salva</label></div>
+        <div class="rounded-xl border border-slate-800 p-3">
+          <div class="mb-3 flex items-center justify-between gap-2"><span class="text-sm font-medium">Modelos</span><button type="button" id="pfFetch" class="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Buscar modelos</button></div>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <label class="block text-sm"><span class="mb-1 block text-slate-400">Chat</span><input id="pfChat" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: gpt-4o-mini"></label>
+            <label class="block text-sm"><span class="mb-1 block text-slate-400">Embeddings</span><input id="pfEmb" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: text-embedding-3-small"></label>
+          </div>
+          <datalist id="pfModels"></datalist>
+          <p id="pfFetchMsg" class="mt-2 text-xs text-slate-400">Preencha ao menos um. Deixe em branco o que o provedor não oferece.</p>
+        </div>
+        <p id="pfError" class="hidden rounded-lg border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"></p>
+      </div>
+      <div class="mt-6 flex justify-end gap-2"><button type="button" id="pfCancel" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm hover:bg-slate-800">Cancelar</button><button id="pfSave" class="rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-indigo-500">Salvar</button></div>
+    </form>
+  </dialog>
   <dialog id="appModal" class="w-[min(92vw,480px)] rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/60">
     <form id="modalForm" class="p-5 sm:p-6"><div class="mb-1 text-xs font-semibold uppercase tracking-widest text-indigo-400">RAG</div><h2 id="modalTitle" class="text-xl font-semibold"></h2><p id="modalDescription" class="mt-2 text-sm text-slate-400"></p><div id="modalFields" class="mt-5 space-y-4"></div><div class="mt-6 flex justify-end gap-2"><button type="button" id="modalCancel" class="rounded-xl border border-slate-700 px-4 py-2.5 text-sm hover:bg-slate-800">Cancelar</button><button type="submit" id="modalSubmit" class="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500">Salvar</button></div></form>
   </dialog>
@@ -95,5 +145,6 @@
   </dialog>
   <script>lucide.createIcons()</script>
   <script src="/app.js"></script>
+  <script src="/settings.js"></script>
 </body>
 </html>

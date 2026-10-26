@@ -1,8 +1,8 @@
 # Uso: docker network create app_net   (uma única vez)
 #      docker compose up -d --build
 # Nenhuma porta é publicada: o app escuta em 3000 dentro da rede app_net (acesse por um proxy nessa rede).
-# O Ollama NÃO roda aqui: o container usa o Ollama já instalado no host.
-# Servidor Linux: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
+# A IA (Ollama, OpenAI, Gemini…) é cadastrada na tela de Configurações do app.
+# Servidor Linux com IA local no próprio servidor: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 name: rag
 services:
   rag:
@@ -16,13 +16,6 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      OLLAMA_BASE_URL: ${DOCKER_OLLAMA_URL:-http://host.docker.internal:11434}
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b-instruct}
-      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
-      OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-true}
-      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
-      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
-      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
       OCR_LANG: ${OCR_LANG:-por+eng}
       CHUNK_SIZE: ${CHUNK_SIZE:-800}
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-120}
@@ -32,9 +25,11 @@ services:
       NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-2}
       QUERY_EXPANSION: ${QUERY_EXPANSION:-false}
       DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
+      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-1024}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
     volumes:
       - ./data:/app/data
+    # Permite cadastrar provedores locais do host (ex.: http://host.docker.internal:11434) nas Configurações.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

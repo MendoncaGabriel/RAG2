@@ -1,130 +1,224 @@
+import crypto from "node:crypto";
 import { db } from "./database.js";
 
-export type ChatProvider = "ollama" | "claude";
-export type EmbeddingProvider = "ollama" | "voyage";
-export interface AISettings {
-  chatProvider: ChatProvider;
-  embeddingProvider: EmbeddingProvider;
-  ollama: { baseUrl: string; chatModel: string; embeddingModel: string };
-  claude: { apiKey: string; model: string };
-  voyage: { apiKey: string; model: string };
-}
-
-db.exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
-
-const defaults: AISettings = {
-  chatProvider: "ollama",
-  embeddingProvider: "ollama",
-  ollama: { baseUrl: "http://localhost:11434", chatModel: "qwen2.5:1.5b-instruct", embeddingModel: "bge-m3" },
-  claude: { apiKey: "", model: "claude-haiku-5-5" },
-  voyage: { apiKey: "", model: "voyage-3.5" },
+// Camada única de IA: provedores cadastrados pelo usuário (tela de Configurações) e dois "slots" ativos,
+// um para chat e outro para embeddings. Nada aqui depende de variáveis de ambiente.
+export type ProviderKind = "ollama" | "openai" | "gemini" | "anthropic";
+export const providerKinds: Record<ProviderKind, { label: string; baseUrl: string; embeddings: boolean }> = {
+  ollama: { label: "Ollama", baseUrl: "http://localhost:11434", embeddings: true },
+  openai: { label: "Compatível com OpenAI", baseUrl: "https://api.openai.com/v1", embeddings: true },
+  gemini: { label: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", embeddings: true },
+  anthropic: { label: "Anthropic (Claude)", baseUrl: "https://api.anthropic.com/v1", embeddings: false },
 };
 
-export function getSettings(): AISettings {
-  const row = db.prepare("SELECT value FROM settings WHERE key='ai'").get() as { value: string } | undefined;
-  let saved: any = {};
-  try { saved = row ? JSON.parse(row.value) : {}; } catch {}
-  return {
-    chatProvider: saved.chatProvider === "claude" ? "claude" : "ollama",
-    embeddingProvider: saved.embeddingProvider === "voyage" ? "voyage" : "ollama",
-    ollama: { ...defaults.ollama, ...saved.ollama },
-    claude: { ...defaults.claude, ...saved.claude },
-    voyage: { ...defaults.voyage, ...saved.voyage },
-  };
+export interface Provider { id: string; name: string; kind: ProviderKind; baseUrl: string; apiKey: string; chatModel: string; embeddingModel: string }
+export type Slot = "chat" | "embedding";
+
+db.exec("CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+db.exec("CREATE TABLE IF NOT EXISTS ai_providers(id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, base_url TEXT NOT NULL, api_key TEXT NOT NULL DEFAULT '', chat_model TEXT NOT NULL DEFAULT '', embedding_model TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')))");
+
+const fromRow = (r: any): Provider => ({ id: r.id, name: r.name, kind: r.kind, baseUrl: r.base_url, apiKey: r.api_key, chatModel: r.chat_model, embeddingModel: r.embedding_model });
+export const getProvider = (id: string | null | undefined) => { const r = id ? db.prepare("SELECT * FROM ai_providers WHERE id=?").get(id) : undefined; return r ? fromRow(r) : null; };
+const getSetting = (key: string) => (db.prepare("SELECT value FROM settings WHERE key=?").get(key) as { value: string } | undefined)?.value || "";
+const setSetting = (key: string, value: string) => { db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value); };
+
+// A chave nunca sai do servidor: o cliente só recebe se existe e os últimos caracteres.
+const toPublic = (p: Provider) => ({ id: p.id, name: p.name, kind: p.kind, kindLabel: providerKinds[p.kind].label, baseUrl: p.baseUrl, chatModel: p.chatModel, embeddingModel: p.embeddingModel, hasKey: !!p.apiKey, keyHint: p.apiKey ? `••••${p.apiKey.slice(-4)}` : "" });
+export function listProviders() {
+  const rows = db.prepare("SELECT * FROM ai_providers ORDER BY created_at, name").all().map(fromRow);
+  return { providers: rows.map(toPublic), active: { chat: getProvider(getSetting("active_chat"))?.id || null, embedding: getProvider(getSetting("active_embedding"))?.id || null } };
 }
 
-const text = (value: unknown, fallback: string) => (typeof value === "string" && value.trim() ? value.trim() : fallback);
-
-// Chaves de API só são substituídas quando um novo valor é enviado.
-export function saveSettings(input: any): AISettings {
-  const current = getSettings();
-  const next: AISettings = {
-    chatProvider: input?.chatProvider === "claude" ? "claude" : "ollama",
-    embeddingProvider: input?.embeddingProvider === "voyage" ? "voyage" : "ollama",
-    ollama: {
-      baseUrl: text(input?.ollama?.baseUrl, defaults.ollama.baseUrl).replace(/\/+$/, ""),
-      chatModel: text(input?.ollama?.chatModel, defaults.ollama.chatModel),
-      embeddingModel: text(input?.ollama?.embeddingModel, defaults.ollama.embeddingModel),
-    },
-    claude: { apiKey: text(input?.claude?.apiKey, current.claude.apiKey), model: text(input?.claude?.model, defaults.claude.model) },
-    voyage: { apiKey: text(input?.voyage?.apiKey, current.voyage.apiKey), model: text(input?.voyage?.model, defaults.voyage.model) },
-  };
-  if (!/^https?:\/\//.test(next.ollama.baseUrl)) throw new Error("A URL do Ollama deve começar com http:// ou https://.");
-  db.prepare("INSERT INTO settings(key,value) VALUES('ai',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(JSON.stringify(next));
-  return next;
+const clean = (value: unknown, max: number) => (typeof value === "string" ? value.trim().slice(0, max) : "");
+function normalize(input: any, current?: Provider): Omit<Provider, "id"> {
+  const kind = (input?.kind ?? current?.kind) as ProviderKind;
+  if (!providerKinds[kind]) throw new Error("Tipo de provedor inválido.");
+  const name = clean(input?.name, 80);
+  if (!name) throw new Error("Nome obrigatório (até 80 caracteres).");
+  const baseUrl = (clean(input?.baseUrl, 300) || providerKinds[kind].baseUrl).replace(/\/+$/, "");
+  if (!/^https?:\/\/\S+$/.test(baseUrl)) throw new Error("A URL base deve começar com http:// ou https://.");
+  // Chave em branco na edição mantém a atual; para remover use clearKey.
+  const apiKey = input?.clearKey ? "" : clean(input?.apiKey, 500) || (current && current.kind === kind ? current.apiKey : "");
+  const chatModel = clean(input?.chatModel, 200), embeddingModel = clean(input?.embeddingModel, 200);
+  if (!chatModel && !embeddingModel) throw new Error("Informe ao menos um modelo (chat ou embeddings).");
+  if (embeddingModel && !providerKinds[kind].embeddings) throw new Error(`${providerKinds[kind].label} não oferece embeddings; deixe o modelo de embeddings vazio.`);
+  return { name, kind, baseUrl, apiKey, chatModel, embeddingModel };
+}
+export function createProvider(input: any) {
+  const data = normalize(input), id = crypto.randomUUID();
+  db.prepare("INSERT INTO ai_providers(id,name,kind,base_url,api_key,chat_model,embedding_model) VALUES(?,?,?,?,?,?,?)").run(id, data.name, data.kind, data.baseUrl, data.apiKey, data.chatModel, data.embeddingModel);
+  return toPublic({ id, ...data });
+}
+export function updateProvider(id: string, input: any) {
+  const current = getProvider(id);
+  if (!current) return null;
+  const data = normalize(input, current);
+  db.prepare("UPDATE ai_providers SET name=?,kind=?,base_url=?,api_key=?,chat_model=?,embedding_model=? WHERE id=?").run(data.name, data.kind, data.baseUrl, data.apiKey, data.chatModel, data.embeddingModel, id);
+  // Se o modelo usado por um slot foi removido da edição, o slot deixa de apontar para este provedor.
+  if (!data.chatModel && getSetting("active_chat") === id) setSetting("active_chat", "");
+  if (!data.embeddingModel && getSetting("active_embedding") === id) setSetting("active_embedding", "");
+  return toPublic({ id, ...data });
+}
+export function deleteProvider(id: string) {
+  const changes = db.prepare("DELETE FROM ai_providers WHERE id=?").run(id).changes;
+  if (getSetting("active_chat") === id) setSetting("active_chat", "");
+  if (getSetting("active_embedding") === id) setSetting("active_embedding", "");
+  return changes > 0;
+}
+export function setActive(input: { chat?: string | null; embedding?: string | null }) {
+  for (const [slot, value] of [["chat", input.chat], ["embedding", input.embedding]] as const) {
+    if (value === undefined) continue;
+    if (value) {
+      const p = getProvider(value);
+      if (!p) throw new Error("Provedor não encontrado.");
+      if (slot === "chat" && !p.chatModel) throw new Error(`"${p.name}" não tem modelo de chat cadastrado.`);
+      if (slot === "embedding" && !p.embeddingModel) throw new Error(`"${p.name}" não tem modelo de embeddings cadastrado.`);
+    }
+    setSetting(`active_${slot}`, value || "");
+  }
+}
+export function activeProvider(slot: Slot): Provider | null {
+  const p = getProvider(getSetting(`active_${slot}`));
+  return p && (slot === "chat" ? p.chatModel : p.embeddingModel) ? p : null;
+}
+export function activeSummary() {
+  const one = (slot: Slot) => { const p = activeProvider(slot); return p ? { id: p.id, name: p.name, kind: p.kind, model: slot === "chat" ? p.chatModel : p.embeddingModel } : null; };
+  return { chat: one("chat"), embedding: one("embedding") };
 }
 
-export function publicSettings() {
-  const s = getSettings();
-  return { ...s, claude: { model: s.claude.model, hasKey: !!s.claude.apiKey }, voyage: { model: s.voyage.model, hasKey: !!s.voyage.apiKey } };
+// ---------- HTTP ----------
+async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number }) {
+  const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${e?.cause?.code || e?.message || e}).`); });
+  return res;
 }
-
-async function request(label: string, url: string, init: RequestInit & { json?: unknown }) {
-  const headers = { ...(init.json ? { "content-type": "application/json" } : {}), ...(init.headers as Record<string, string>) };
-  const res = await fetch(url, { method: init.method || (init.json ? "POST" : "GET"), headers, body: init.json ? JSON.stringify(init.json) : undefined, signal: AbortSignal.timeout(180_000) });
-  if (!res.ok) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
+// Erro HTTP legível; no Ollama, modelo ausente vira instrução de como baixar ou trocar.
+async function httpError(label: string, res: Response, model?: string) {
+  const text = (await res.text()).slice(0, 500);
+  if (label === "Ollama" && res.status === 404 && /not found/i.test(text) && model) return new Error(`O modelo "${model}" não está instalado no Ollama. Baixe com "ollama pull ${model}" ou escolha outro modelo em Configurações (use "Buscar modelos" para ver os instalados).`);
+  return new Error(`${label} (${res.status}): ${text}`);
+}
+async function jsonOrThrow(label: string, res: Response, model?: string) {
+  if (!res.ok) throw await httpError(label, res, model);
   return res.json() as Promise<any>;
 }
-
-const ollamaRequest = (path: string, json?: unknown) => request("Ollama", `${getSettings().ollama.baseUrl}${path}`, { json });
-
-export interface ChatOptions { system: string; user: string; temperature?: number; topP?: number; maxTokens?: number; contextSize?: number; json?: boolean }
-
-export async function chat(opts: ChatOptions): Promise<string> {
-  const s = getSettings();
-  if (s.chatProvider === "claude") {
-    if (!s.claude.apiKey) throw new Error("Chave de API do Claude não configurada. Abra Configurações de IA.");
-    const result = await request("Claude", "https://api.anthropic.com/v1/messages", {
-      headers: { "x-api-key": s.claude.apiKey, "anthropic-version": "2023-06-01" },
-      json: { model: s.claude.model, max_tokens: opts.maxTokens ?? 512, temperature: opts.temperature ?? 0, system: opts.system, messages: [{ role: "user", content: opts.user }] },
-    });
-    return String((result.content || []).filter((b: any) => b.type === "text").map((b: any) => b.text).join(""));
+// Lê NDJSON (Ollama) ou SSE ("data: {...}") linha a linha.
+async function readLines(res: Response, handle: (payload: string) => void) {
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const flush = (line: string) => { const t = line.trim(); if (!t || t.startsWith("event:") || t.startsWith(":")) return; const p = t.startsWith("data:") ? t.slice(5).trim() : t; if (p && p !== "[DONE]") handle(p); };
+  for await (const part of res.body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(part, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    lines.forEach(flush);
   }
-  const result = await ollamaRequest("/api/chat", {
-    model: s.ollama.chatModel,
-    stream: false,
-    ...(opts.json ? { format: "json" } : {}),
-    keep_alive: "5m",
-    options: { temperature: opts.temperature ?? 0, top_p: opts.topP ?? 0.8, num_ctx: opts.contextSize ?? 4096, num_predict: opts.maxTokens ?? 512 },
-    messages: [{ role: "system", content: opts.system }, { role: "user", content: opts.user }],
-  });
-  return String(result.message?.content || "");
+  flush(buffer);
 }
 
-export async function embedMany(inputs: string[]): Promise<number[][]> {
-  const s = getSettings();
-  if (s.embeddingProvider === "voyage") {
-    if (!s.voyage.apiKey) throw new Error("Chave de API do Voyage AI não configurada. Abra Configurações de IA.");
-    const result = await request("Voyage AI", "https://api.voyageai.com/v1/embeddings", { headers: { authorization: `Bearer ${s.voyage.apiKey}` }, json: { model: s.voyage.model, input: inputs } });
-    const vectors = (result.data || []).sort((a: any, b: any) => a.index - b.index).map((d: any) => d.embedding);
-    if (vectors.length !== inputs.length) throw new Error(`Voyage AI retornou embeddings incompletos para ${s.voyage.model}.`);
-    return vectors;
+// ---------- Chat ----------
+export type Msg = { role: "system" | "user" | "assistant"; content: string };
+export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean }
+
+export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token: string) => void): Promise<string> {
+  let full = "";
+  const emit = (token: string) => { if (token) { full += token; onToken?.(token); } };
+  const maxTokens = opts.maxTokens ?? 512, system = opts.messages.filter(m => m.role === "system").map(m => m.content).join("\n\n");
+  const turns = opts.messages.filter(m => m.role !== "system");
+  const label = providerKinds[p.kind].label;
+  if (p.kind === "ollama") {
+    const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, json: {
+      model: p.chatModel, stream: true, keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
+      options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens },
+      messages: opts.messages,
+    } });
+    if (!res.ok || !res.body) throw await httpError(label, res, p.chatModel);
+    await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error}`); emit(String(c.message?.content || "")); });
+  } else if (p.kind === "openai") {
+    const body: Record<string, any> = { model: p.chatModel, stream: true, messages: opts.messages, temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, max_tokens: maxTokens, ...(opts.json ? { response_format: { type: "json_object" } } : {}) };
+    let res: Response;
+    // Modelos novos da OpenAI exigem max_completion_tokens e rejeitam temperature; ajusta e repete.
+    for (let attempt = 0; ; attempt++) {
+      res = await http(label, `${p.baseUrl}/chat/completions`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, json: body });
+      if (res.status !== 400 || attempt >= 2) break;
+      const text = await res.clone().text();
+      if (/max_completion_tokens/.test(text) && "max_tokens" in body) { delete body.max_tokens; body.max_completion_tokens = maxTokens; }
+      else if (/temperature|top_p/.test(text) && ("temperature" in body || "top_p" in body)) { delete body.temperature; delete body.top_p; }
+      else break;
+    }
+    if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
+    await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error.message || JSON.stringify(c.error)}`); emit(String(c.choices?.[0]?.delta?.content || "")); });
+  } else if (p.kind === "anthropic") {
+    const res = await http(label, `${p.baseUrl}/messages`, { headers: { "x-api-key": p.apiKey, "anthropic-version": "2023-06-01" }, timeout: 600_000, json: {
+      model: p.chatModel, max_tokens: maxTokens, stream: true, temperature: opts.temperature ?? 0.1, ...(system ? { system } : {}), messages: turns,
+    } });
+    if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
+    await readLines(res, line => { const c = JSON.parse(line); if (c.type === "error") throw new Error(`${label}: ${c.error?.message || "erro"}`); if (c.type === "content_block_delta") emit(String(c.delta?.text || "")); });
+  } else {
+    const model = p.chatModel.replace(/^models\//, "");
+    const res = await http(label, `${p.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, { headers: { "x-goog-api-key": p.apiKey }, timeout: 600_000, json: {
+      ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+      contents: turns.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
+      generationConfig: { temperature: opts.temperature ?? 0.1, topP: opts.topP ?? 0.8, maxOutputTokens: maxTokens, ...(opts.json ? { responseMimeType: "application/json" } : {}) },
+    } });
+    if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
+    await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error.message || "erro"}`); for (const part of c.candidates?.[0]?.content?.parts || []) if (!part.thought) emit(String(part.text || "")); });
   }
-  const result = await ollamaRequest("/api/embed", { model: s.ollama.embeddingModel, input: inputs });
-  if (!Array.isArray(result.embeddings) || result.embeddings.length !== inputs.length) throw new Error(`Ollama retornou embeddings incompletos. Verifique se o modelo ${s.ollama.embeddingModel} foi baixado.`);
-  return result.embeddings;
+  return full;
+}
+export async function chat(opts: ChatOptions, onToken?: (token: string) => void) {
+  const p = activeProvider("chat");
+  if (!p) throw new Error("Nenhuma IA de chat selecionada. Abra Configurações, cadastre um provedor e escolha-o para o chat.");
+  return chatWith(p, opts, onToken);
 }
 
-export interface AICheck { ok: boolean; detail: string }
-// Verificação leve (sem custo) por padrão; "deep" executa uma chamada real de chat e de embedding.
-export async function checkAI(deep = false): Promise<{ chat: AICheck; embedding: AICheck; ollamaModels: string[] }> {
-  const s = getSettings();
-  let ollamaModels: string[] = [];
-  const run = async (fn: () => Promise<string>): Promise<AICheck> => { try { return { ok: true, detail: await fn() }; } catch (e) { return { ok: false, detail: e instanceof Error ? e.message : String(e) }; } };
-  const usesOllama = s.chatProvider === "ollama" || s.embeddingProvider === "ollama";
-  let ollamaCheck: AICheck | null = null;
-  if (usesOllama) {
-    ollamaCheck = await run(async () => { ollamaModels = ((await ollamaRequest("/api/tags")).models || []).map((m: any) => m.name); return `${ollamaModels.length} modelo(s) disponível(is)`; });
-  }
-  const chatCheck = s.chatProvider === "ollama"
-    ? ollamaCheck!.ok && deep ? await run(async () => { await chat({ system: "Responda apenas OK.", user: "ping", maxTokens: 8, contextSize: 512 }); return `Modelo ${s.ollama.chatModel} respondeu`; }) : ollamaCheck!
-    : !s.claude.apiKey ? { ok: false, detail: "Chave de API não configurada." }
-    : deep ? await run(async () => { await chat({ system: "Responda apenas OK.", user: "ping", maxTokens: 8 }); return `Modelo ${s.claude.model} respondeu`; })
-    : await run(async () => { await request("Claude", "https://api.anthropic.com/v1/models?limit=1", { headers: { "x-api-key": s.claude.apiKey, "anthropic-version": "2023-06-01" } }); return "Chave válida"; });
-  const embeddingCheck = s.embeddingProvider === "ollama"
-    ? ollamaCheck!.ok && deep ? await run(async () => { const [v] = await embedMany(["teste"]); return `Modelo ${s.ollama.embeddingModel} respondeu (${v.length} dimensões)`; }) : ollamaCheck!
-    : !s.voyage.apiKey ? { ok: false, detail: "Chave de API não configurada." }
-    : deep ? await run(async () => { const [v] = await embedMany(["teste"]); return `Modelo ${s.voyage.model} respondeu (${v.length} dimensões)`; })
-    : { ok: true, detail: "Chave configurada" };
-  return { chat: chatCheck, embedding: embeddingCheck, ollamaModels };
+// ---------- Embeddings ----------
+// Modelos como nomic-embed-text e e5 foram treinados com prefixos distintos para consulta e documento.
+const embedPrefix = (model: string, kind: "query" | "document") => {
+  const m = model.toLowerCase();
+  if (m.includes("nomic")) return kind === "query" ? "search_query: " : "search_document: ";
+  if (/e5/.test(m)) return kind === "query" ? "query: " : "passage: ";
+  return "";
+};
+export async function embedWith(p: Provider, inputs: string[], kind: "query" | "document" = "document"): Promise<number[][]> {
+  const label = providerKinds[p.kind].label, model = p.embeddingModel;
+  let vectors: number[][];
+  if (p.kind === "ollama") {
+    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t), keep_alive: "30m" } }), model);
+    vectors = data.embeddings;
+  } else if (p.kind === "openai") {
+    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/embeddings`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t) } }));
+    vectors = (data.data || []).sort((a: any, b: any) => a.index - b.index).map((d: any) => d.embedding);
+  } else if (p.kind === "gemini") {
+    const name = model.replace(/^models\//, "");
+    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/models/${encodeURIComponent(name)}:batchEmbedContents`, { headers: { "x-goog-api-key": p.apiKey }, json: { requests: inputs.map(text => ({ model: `models/${name}`, content: { parts: [{ text }] }, taskType: kind === "query" ? "RETRIEVAL_QUERY" : "RETRIEVAL_DOCUMENT" })) } }));
+    vectors = (data.embeddings || []).map((e: any) => e.values);
+  } else throw new Error(`${label} não oferece embeddings.`);
+  if (!Array.isArray(vectors) || vectors.length !== inputs.length || vectors.some(v => !Array.isArray(v))) throw new Error(`${p.name} retornou embeddings incompletos para ${model}. Verifique se o modelo existe.`);
+  return vectors;
+}
+export async function embedMany(inputs: string[], kind: "query" | "document" = "document") {
+  const p = activeProvider("embedding");
+  if (!p) throw new Error("Nenhuma IA de embeddings selecionada. Abra Configurações, cadastre um provedor e escolha-o para embeddings.");
+  return embedWith(p, inputs, kind);
+}
+
+// ---------- Descoberta de modelos e teste ----------
+export async function listModels(input: { kind: ProviderKind; baseUrl?: string; apiKey?: string }): Promise<string[]> {
+  if (!providerKinds[input.kind]) throw new Error("Tipo de provedor inválido.");
+  const base = (input.baseUrl || providerKinds[input.kind].baseUrl).replace(/\/+$/, ""), key = input.apiKey || "", label = providerKinds[input.kind].label;
+  const get = async (path: string, headers: Record<string, string> = {}) => jsonOrThrow(label, await http(label, `${base}${path}`, { headers, timeout: 15_000 }));
+  let names: string[];
+  if (input.kind === "ollama") names = ((await get("/api/tags", key ? { authorization: `Bearer ${key}` } : {})).models || []).map((m: any) => m.name);
+  else if (input.kind === "openai") names = ((await get("/models", key ? { authorization: `Bearer ${key}` } : {})).data || []).map((m: any) => m.id);
+  else if (input.kind === "anthropic") names = ((await get("/models?limit=100", { "x-api-key": key, "anthropic-version": "2023-06-01" })).data || []).map((m: any) => m.id);
+  else names = ((await get("/models?pageSize=200", { "x-goog-api-key": key })).models || []).map((m: any) => String(m.name).replace(/^models\//, ""));
+  return names.sort();
+}
+// Faz uma chamada real e mínima para cada modelo cadastrado.
+export async function testProvider(p: Provider) {
+  const run = async (fn: () => Promise<string>) => { const t = Date.now(); try { return { ok: true, detail: `${await fn()} · ${Date.now() - t} ms` }; } catch (e) { return { ok: false, detail: e instanceof Error ? e.message : String(e) }; } };
+  return {
+    chat: p.chatModel ? await run(async () => { await chatWith(p, { messages: [{ role: "user", content: "Responda apenas OK." }], maxTokens: 16, contextSize: 512 }); return `Chat (${p.chatModel}) respondeu`; }) : null,
+    embedding: p.embeddingModel ? await run(async () => { const [v] = await embedWith(p, ["teste"]); return `Embeddings (${p.embeddingModel}) responderam com ${v.length} dimensões`; }) : null,
+  };
 }
