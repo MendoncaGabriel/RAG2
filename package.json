@@ -6,9 +6,9 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "tsx watch --use-system-ca src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js",
+    "start": "node --use-system-ca dist/server.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

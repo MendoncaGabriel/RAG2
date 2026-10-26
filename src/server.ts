@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
+import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
@@ -68,7 +68,7 @@ function fallbackConversationTitle(question: string) {
 }
 async function refineConversationTitle(id: string, question: string, answer: string, fallback: string) {
   try {
-    const output = await chat({ temperature: 0.2, topP: 0.8, contextSize: 2048, maxTokens: 32, messages: [
+    const output = await chat({ temperature: 0.2, topP: 0.8, contextSize: chatContext(), maxTokens: 32, messages: [
       { role: "system", content: "Crie um título curto para esta conversa, no mesmo idioma da pergunta. Resuma o assunto em 2 a 6 palavras, no máximo 48 caracteres. Não use aspas, pontuação final nem frases como 'Conversa sobre'. Retorne somente o título." },
       { role: "user", content: `Pergunta: ${question}
 Resposta: ${answer.slice(0, 1200)}` },
