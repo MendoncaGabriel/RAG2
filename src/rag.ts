@@ -132,7 +132,7 @@ async function expandQuestion(question: string): Promise<string[]> {
   console.info(`[RAG] Variações de busca (${variations.length}): ${JSON.stringify(variations)}`);
   return variations;
 }
-async function ensureSavedMessageEmbeddings(notebookId: string) {
+export async function ensureSavedMessageEmbeddings(notebookId: string) {
   const pending = db.prepare("SELECT s.id,m.content FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? AND s.embedding IS NULL").all(notebookId) as { id: string; content: string }[];
   const update = db.prepare("UPDATE saved_messages SET embedding=?,dimensions=? WHERE id=? AND embedding IS NULL");
   for (let start = 0; start < pending.length; start += 16) {
@@ -188,6 +188,8 @@ function summarySample(notebookId: string, limit: number) {
       if (row) out.push({ ...row, document_name: d.name, source_type: "document", document_id: d.id, score: 1 });
     }
   }
+  const saved = db.prepare("SELECT s.message_id AS id,m.content,s.title FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? ORDER BY s.created_at DESC LIMIT 2").all(notebookId) as { id: string; content: string; title: string }[];
+  for (const s of saved) out.push({ id: s.id, content: s.content, chunk_index: 0, document_name: `Mensagem salva: ${s.title}`, source_type: "saved_message", document_id: null, score: 1 });
   return out;
 }
 
@@ -201,6 +203,8 @@ type IndexRow = { id: string; content: string; document_id: string | null; docum
 type NotebookIndex = { signature: string; rows: IndexRow[]; df: Map<string, number>; avgLen: number };
 const indexCache = new Map<string, NotebookIndex>();
 const MAX_CACHED_NOTEBOOKS = 8;
+// A assinatura do índice não detecta tudo (ex.: apagar e salvar outra mensagem com o mesmo tamanho); alterações em mensagens salvas descartam o cache do notebook.
+export const invalidateIndex = (notebookId: string) => { indexCache.delete(notebookId); };
 
 function indexSignature(notebookId: string): string {
   const c = db.prepare("SELECT count(*) AS n, coalesce(max(c.rowid),0) AS m FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.notebook_id=? AND d.status='processed'").get(notebookId) as { n: number; m: number };
@@ -339,7 +343,7 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   let scored: any[] = [], summaryMode = false;
   // "Resuma o notebook" amostra o material todo; "o que é X resumidamente" tem um tópico e usa busca normal.
   const topicTerms = [...searchTerms(normalizedQuestion)].filter(term => !genericScope.has(term) && !/^(resum|sumariz|sintetiz|summar|overview|tldr)/.test(term));
-  if (summaryIntent.test(normalizedQuestion) && topicTerms.length <= 1 && chunkCount.n) {
+  if (summaryIntent.test(normalizedQuestion) && topicTerms.length <= 1 && (chunkCount.n || savedCount.n)) {
     scored = summarySample(notebookId, Math.min(10, topK + 2));
     summaryMode = true;
   } else {
