@@ -15,6 +15,12 @@ services:
       - app_net
     environment:
       NODE_ENV: production
+      MASTER_USER: ${MASTER_USER:?defina MASTER_USER no .env}
+      MASTER_PASSWORD: ${MASTER_PASSWORD:?defina MASTER_PASSWORD no .env}
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      TRUST_PROXY: ${TRUST_PROXY:-true}
       PORT: 3000
       OCR_LANG: ${OCR_LANG:-por+eng}
       CHUNK_SIZE: ${CHUNK_SIZE:-800}

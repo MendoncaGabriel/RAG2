@@ -158,7 +158,9 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
     const res = await http(label, `${p.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, { headers: { "x-goog-api-key": p.apiKey }, timeout: 600_000, json: {
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       contents: turns.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
-      generationConfig: { temperature: opts.temperature ?? 0.1, topP: opts.topP ?? 0.8, maxOutputTokens: maxTokens, ...(opts.json ? { responseMimeType: "application/json" } : {}) },
+      generationConfig: { temperature: opts.temperature ?? 0.1, topP: opts.topP ?? 0.8,
+        // O "raciocínio" do Gemini conta no limite de saída: desliga nos modelos flash e dá folga nos demais, senão a resposta sai cortada.
+        ...(/flash/i.test(model) ? { thinkingConfig: { thinkingBudget: 0 }, maxOutputTokens: maxTokens } : { maxOutputTokens: maxTokens + 4096 }), ...(opts.json ? { responseMimeType: "application/json" } : {}) },
     } });
     if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
     await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error.message || "erro"}`); for (const part of c.candidates?.[0]?.content?.parts || []) if (!part.thought) emit(String(part.text || "")); });

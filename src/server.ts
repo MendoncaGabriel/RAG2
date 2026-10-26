@@ -3,14 +3,62 @@ import express from "express";
 import multer from "multer";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, ensureSavedMessageEmbeddings, invalidateIndex, uuid } from "./rag.js";
+import { ask, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
 const app = express(), upload = multer({ dest: uploadDir, limits: { fileSize: Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024, files: 50 } });
+if (process.env.TRUST_PROXY === "true") app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use((_req, res, next) => { res.set({ "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin" }); next(); });
 app.use(express.json({ limit: "2mb" }));
+const isPublicNotebook = (id: string) => !!db.prepare("SELECT 1 FROM notebooks WHERE id=? AND is_public=1").get(id);
+// Autenticação e telas de apresentação: acessíveis sem login (as privadas exigem login).
+app.post("/api/auth/login", login);
+app.post("/api/auth/logout", logout);
+app.get("/api/auth/me", (req, res) => currentUser(req) ? res.json({ ok: true }) : res.sendStatus(401));
+app.get("/api/present/:id", (req, res) => {
+  if (!currentUser(req) && !isPublicNotebook(req.params.id)) return res.sendStatus(401);
+  const nb = db.prepare("SELECT name FROM notebooks WHERE id=?").get(req.params.id) as { name: string } | undefined;
+  return nb ? res.json({ name: nb.name }) : res.sendStatus(404);
+});
+// A apresentação não grava nada no banco: o histórico fica no navegador (sessão web) e vem junto a cada pergunta.
+app.post("/api/present/:id/ask", rateLimit("present-ask", Number(process.env.PRESENT_ASK_PER_MIN) || 20, 60_000), async (req, res) => {
+  const nbId = String(req.params.id);
+  if (!currentUser(req) && !isPublicNotebook(nbId)) return res.sendStatus(401);
+  if (!existsNotebook(nbId)) return res.sendStatus(404);
+  const question = String(req.body?.content || "").trim();
+  if (!question || question.length > 5000) return res.status(400).json({ error: "Pergunta obrigatória (máximo de 5000 caracteres)." });
+  const history = (Array.isArray(req.body?.history) ? req.body.history.slice(-8) : [])
+    .filter((m: any) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    .map((m: any) => ({ role: m.role as string, content: m.content.slice(0, 4000) }));
+  res.status(200).set({ "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-cache", "x-accel-buffering": "no" });
+  res.flushHeaders();
+  const send = (event: unknown) => res.write(JSON.stringify(event) + "\n");
+  try {
+    const result = await ask(nbId, question, { history, onToken: token => send({ type: "token", token }) });
+    send({ type: "done", assistant: { content: result.answer } });
+  } catch (e) { send({ type: "error", error: e instanceof Error ? e.message : String(e) }); }
+  res.end();
+});
+// Todo o resto da API exige login.
+app.use("/api", (req, res, next) => {
+  if (currentUser(req)) return next();
+  res.status(401).json({ error: "Sessão expirada. Faça login novamente." });
+});
+const openPages = new Set(["/login.html", "/present.html", "/favicon.svg"]);
+app.use((req, res, next) => {
+  if (openPages.has(req.path) || currentUser(req)) return next();
+  return req.path === "/" || req.path.endsWith(".html") ? res.redirect("/login.html") : res.sendStatus(401);
+});
 app.use(express.static(path.resolve("public")));
+app.put("/api/notebooks/:id/public", (req, res) => {
+  if (!existsNotebook(req.params.id)) return res.sendStatus(404);
+  db.prepare("UPDATE notebooks SET is_public=? WHERE id=?").run(req.body?.public === true ? 1 : 0, req.params.id);
+  res.json({ is_public: req.body?.public === true ? 1 : 0 });
+});
 const fail = (res: express.Response, e: unknown) => res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
 const existsNotebook = (id: string) => !!db.prepare("SELECT 1 FROM notebooks WHERE id=?").get(id);
 function fallbackConversationTitle(question: string) {
@@ -31,6 +79,33 @@ Resposta: ${answer.slice(0, 1200)}` },
   } catch (error) {
     console.warn("Falha ao gerar título da conversa:", error instanceof Error ? error.message : String(error));
   }
+}
+// Fila: cada conversa guarda no máximo MAX_MESSAGES_PER_CONVERSATION mensagens; as mais novas entram e as mais antigas saem.
+// Mensagens salvas pelo usuário são preservadas (apagá-las removeria o item salvo).
+const maxMessagesPerConversation = Math.max(10, Number(process.env.MAX_MESSAGES_PER_CONVERSATION) || 40);
+function trimConversationQueue(id: string) {
+  const removed = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE conversation_id=? AND id NOT IN (SELECT message_id FROM saved_messages) ORDER BY created_at,rowid LIMIT MAX(0,(SELECT count(*) FROM messages WHERE conversation_id=?)-?))").run(id, id, maxMessagesPerConversation).changes as number;
+  // O resumo conta mensagens a partir do início; ao sair mensagens antigas, o deslocamento acompanha.
+  if (removed) db.prepare("UPDATE conversations SET summary_count=MAX(0,summary_count-?) WHERE id=?").run(removed, id);
+}
+// Resumo rolante: mantém a janela recente fora do resumo e condensa o que sai dela, em lotes (1 chamada a cada ~2 trocas).
+const summarizing = new Set<string>();
+async function updateConversationSummary(id: string) {
+  if (summarizing.has(id)) return;
+  summarizing.add(id);
+  try {
+    const c = db.prepare("SELECT summary,summary_count FROM conversations WHERE id=?").get(id) as { summary: string; summary_count: number } | undefined;
+    if (!c) return;
+    const total = (db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(id) as { n: number }).n;
+    const pending = total - 4 - c.summary_count;
+    if (pending < 2) return;
+    const take = Math.min(pending, 6);
+    const rows = db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT ? OFFSET ?").all(id, take, c.summary_count) as { role: string; content: string }[];
+    const summary = await summarizeConversation(c.summary, rows);
+    if (summary) db.prepare("UPDATE conversations SET summary=?,summary_count=? WHERE id=? AND summary_count=?").run(summary, c.summary_count + take, id, c.summary_count);
+  } catch (error) {
+    console.warn("Falha ao resumir conversa:", error instanceof Error ? error.message : String(error));
+  } finally { summarizing.delete(id); }
 }
 // Recupera de desligamentos enquanto um arquivo estava sendo indexado.
 db.prepare("UPDATE documents SET status='failed',error='Processamento interrompido; clique em Reprocessar.' WHERE status='processing'").run();
@@ -63,19 +138,21 @@ app.patch("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const tit
 app.delete("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const result=db.prepare("DELETE FROM saved_messages WHERE id=? AND notebook_id=?").run(req.params.id,req.params.notebookId); invalidateIndex(req.params.notebookId); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 app.get("/api/conversations/:id/messages",(req,res)=>res.json(db.prepare("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at").all(req.params.id)));
 app.post("/api/conversations/:id/messages",async(req,res)=>{
-  const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string}|undefined;
+  const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string;summary:string;summary_count:number}|undefined;
   if(!conversation)return res.sendStatus(404);
   const question=String(req.body?.content||"").trim();
   if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."});
   const stream=req.query.stream==="1",started=Date.now();
   const send=(event:unknown)=>{ if(stream)res.write(JSON.stringify(event)+"\n"); };
   try{
-    const history=(db.prepare("SELECT role,content FROM (SELECT role,content,created_at,rowid FROM messages WHERE conversation_id=? ORDER BY created_at DESC,rowid DESC LIMIT 4) ORDER BY created_at,rowid").all(conversation.id) as {role:string;content:string}[]);
+    // Só as mensagens ainda não cobertas pelo resumo (no máximo 6) entram como histórico.
+    const total=(db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(conversation.id) as {n:number}).n;
+    const history=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(conversation.summary_count,total-6)) as {role:string;content:string}[];
     const createTitle=history.length===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
-    const result=await ask(conversation.notebook_id,question,{history,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
+    const result=await ask(conversation.notebook_id,question,{history,summary:conversation.summary,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
     const id=uuid();
     const durationMs=Date.now()-started;
     db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources,duration_ms) VALUES(?,?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources),durationMs);
@@ -83,6 +160,8 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     const payload={user:{id:userId,role:"user",content:question},assistant:{id,role:"assistant",content:result.answer,sources:result.sources,duration_ms:durationMs}};
     if(stream){send({type:"done",...payload});res.end();}else res.json(payload);
     if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback);
+    trimConversationQueue(conversation.id);
+    void updateConversationSummary(conversation.id);
   }catch(e){
     if(stream&&res.headersSent){send({type:"error",error:e instanceof Error?e.message:String(e)});res.end();}else fail(res,e);
   }

@@ -24,3 +24,6 @@ try { db.exec("ALTER TABLE saved_messages ADD COLUMN embedding BLOB"); } catch {
 try { db.exec("ALTER TABLE saved_messages ADD COLUMN dimensions INTEGER"); } catch {}
 try { db.exec("ALTER TABLE saved_messages ADD COLUMN index_error TEXT"); } catch {}
 try { db.exec("ALTER TABLE messages ADD COLUMN duration_ms INTEGER"); } catch {}
+try { db.exec("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''"); } catch {}
+try { db.exec("ALTER TABLE conversations ADD COLUMN summary_count INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE notebooks ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0"); } catch {}
