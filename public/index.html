@@ -90,28 +90,30 @@
   <main id="settings" class="mx-auto hidden max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
     <div class="mb-6 flex items-start gap-3">
       <button id="settingsBack" class="flex shrink-0 items-center gap-2 rounded-xl border border-slate-800 px-3 py-2 text-sm text-indigo-600 hover:bg-slate-900"><i data-lucide="arrow-left" class="h-4 w-4"></i><span class="hidden sm:inline">Voltar</span></button>
-      <div><h1 class="text-2xl font-bold sm:text-3xl">Configurações de IA</h1><p class="mt-2 text-sm text-slate-400 sm:text-base">Cadastre os provedores de IA e escolha qual deles o sistema usa.</p></div>
+      <div><h1 class="text-2xl font-bold sm:text-3xl">Configurações de IA</h1><p class="mt-2 text-sm text-slate-400 sm:text-base">Duas coisas independentes: a IA que responde (chat) e o modelo que busca nos documentos (embeddings).</p></div>
     </div>
 
     <section class="mb-6 rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
-      <div class="mb-1 flex items-center gap-2"><i data-lucide="zap" class="h-4 w-4 text-indigo-400"></i><h2 class="font-semibold">IA em uso</h2><span id="activeSaved" class="text-xs text-emerald-400"></span></div>
-      <p class="mb-4 text-sm text-slate-400">O chat e os embeddings podem usar provedores diferentes.</p>
-      <div class="grid gap-4 sm:grid-cols-2">
-        <label class="block text-sm"><span class="mb-1 block font-medium">Chat <span class="font-normal text-slate-400">· gera as respostas</span></span><select id="activeChat" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
-        <label class="block text-sm"><span class="mb-1 block font-medium">Embeddings <span class="font-normal text-slate-400">· busca nos documentos</span></span><select id="activeEmbedding" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
-      </div>
-      <p class="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">Ao trocar o modelo de embeddings, abra um notebook e clique em <b>Reindexar</b> em Documentos: vetores de modelos diferentes não são comparáveis.</p>
+      <div class="mb-1 flex items-center gap-2"><i data-lucide="message-square" class="h-4 w-4 text-indigo-400"></i><h2 class="font-semibold">IA de chat</h2><span id="savedChat" class="text-xs text-emerald-400"></span></div>
+      <p class="mb-4 text-sm text-slate-400">É a IA que lê os trechos encontrados e escreve as respostas. Ex.: GPT, Gemini, Claude, Llama.</p>
+      <label class="block text-sm"><span class="mb-1 block font-medium">Em uso agora</span><select id="activeChat" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
+      <div class="mb-3 mt-5 flex flex-wrap items-center justify-between gap-3"><h3 class="text-sm font-medium text-slate-300">Cadastradas</h3><button data-add="chat" class="flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"><i data-lucide="plus" class="h-4 w-4"></i>Adicionar IA de chat</button></div>
+      <div id="listChat" class="space-y-3"></div>
     </section>
 
-    <section class="rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
-      <div class="mb-4 flex flex-wrap items-center justify-between gap-3"><div><h2 class="font-semibold">Provedores cadastrados</h2><p class="text-sm text-slate-400">Ollama, OpenAI e compatíveis, Gemini, Claude…</p></div><button id="addProvider" class="flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-indigo-500"><i data-lucide="plus" class="h-4 w-4"></i>Adicionar provedor</button></div>
-      <div id="providers" class="space-y-3"></div>
+    <section class="mb-6 rounded-xl border border-slate-800 bg-slate-900 p-4 sm:p-5">
+      <div class="mb-1 flex items-center gap-2"><i data-lucide="search" class="h-4 w-4 text-indigo-400"></i><h2 class="font-semibold">Embeddings (busca nos documentos)</h2><span id="savedEmbedding" class="text-xs text-emerald-400"></span></div>
+      <p class="mb-4 text-sm text-slate-400">É o modelo que transforma textos em vetores para encontrar os trechos certos. Não conversa: só ajuda a buscar. Ex.: bge-m3, text-embedding-3-small.</p>
+      <label class="block text-sm"><span class="mb-1 block font-medium">Em uso agora</span><select id="activeEmbedding" class="w-full rounded-lg border px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600"></select></label>
+      <p class="mt-4 rounded-lg border border-amber-900/50 bg-amber-950/30 px-3 py-2 text-xs text-amber-300">Ao trocar o modelo de embeddings, abra um notebook e clique em <b>Reindexar</b> em Documentos: vetores de modelos diferentes não são comparáveis.</p>
+      <div class="mb-3 mt-5 flex flex-wrap items-center justify-between gap-3"><h3 class="text-sm font-medium text-slate-300">Cadastradas</h3><button data-add="embedding" class="flex items-center gap-2 rounded-xl bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"><i data-lucide="plus" class="h-4 w-4"></i>Adicionar embeddings</button></div>
+      <div id="listEmbedding" class="space-y-3"></div>
     </section>
   </main>
 
   <dialog id="providerDialog" class="w-[min(94vw,560px)] max-h-[92vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-0 text-slate-100 shadow-2xl backdrop:bg-black/60">
     <form id="providerForm" class="p-5 sm:p-6" autocomplete="off">
-      <div class="mb-1 text-xs font-semibold uppercase tracking-widest text-indigo-400">Provedor de IA</div>
+      <div id="providerKicker" class="mb-1 text-xs font-semibold uppercase tracking-widest text-indigo-400">Provedor de IA</div>
       <h2 id="providerTitle" class="text-xl font-semibold">Novo provedor</h2>
       <div class="mt-5 space-y-4">
         <label id="presetRow" class="block text-sm"><span class="mb-1 block font-medium">Começar de um modelo pronto</span><select id="pfPreset" class="w-full rounded-lg border px-3 py-2.5 text-sm"></select></label>
@@ -122,13 +124,13 @@
           <div class="flex gap-2"><input id="pfKey" type="password" maxlength="500" class="min-w-0 flex-1 rounded-lg border px-3 py-2.5 font-mono text-sm"><button type="button" id="pfKeyToggle" class="rounded-lg border border-slate-700 px-3 text-sm hover:bg-slate-800">Ver</button></div>
           <label id="pfClearRow" class="mt-2 hidden items-center gap-2 text-xs text-slate-400"><input id="pfClear" type="checkbox" class="h-4 w-4"> Remover a chave salva</label></div>
         <div class="rounded-xl border border-slate-800 p-3">
-          <div class="mb-3 flex items-center justify-between gap-2"><span class="text-sm font-medium">Modelos</span><button type="button" id="pfFetch" class="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Buscar modelos</button></div>
-          <div class="grid gap-3 sm:grid-cols-2">
-            <label class="block text-sm"><span class="mb-1 block text-slate-400">Chat</span><input id="pfChat" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: gpt-4o-mini"></label>
-            <label class="block text-sm"><span class="mb-1 block text-slate-400">Embeddings</span><input id="pfEmb" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: text-embedding-3-small"></label>
+          <div class="mb-3 flex items-center justify-between gap-2"><span class="text-sm font-medium">Modelo</span><button type="button" id="pfFetch" class="flex items-center gap-1.5 rounded-lg border border-slate-700 px-3 py-1.5 text-xs hover:bg-slate-800"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Buscar modelos</button></div>
+          <div class="space-y-3">
+            <label id="pfChatRow" class="block text-sm"><span class="mb-1 block text-slate-400">Modelo de chat</span><input id="pfChat" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: gpt-4o-mini"></label>
+            <label id="pfEmbRow" class="block text-sm"><span class="mb-1 block text-slate-400">Modelo de embeddings</span><input id="pfEmb" list="pfModels" maxlength="200" class="w-full rounded-lg border px-3 py-2.5 text-sm" placeholder="ex.: text-embedding-3-small"></label>
           </div>
           <datalist id="pfModels"></datalist>
-          <p id="pfFetchMsg" class="mt-2 text-xs text-slate-400">Preencha ao menos um. Deixe em branco o que o provedor não oferece.</p>
+          <p id="pfFetchMsg" class="mt-2 text-xs text-slate-400">Digite o nome do modelo ou use “Buscar modelos”.</p>
         </div>
         <p id="pfError" class="hidden rounded-lg border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"></p>
       </div>
