@@ -1,4 +1,6 @@
-# Uso: docker compose up -d --build   (depois abra http://localhost:3000)
+# Uso: docker network create app_net   (uma única vez)
+#      docker compose up -d --build
+# Nenhuma porta é publicada: o app escuta em 3000 dentro da rede app_net (acesse por um proxy nessa rede).
 # O Ollama NÃO roda aqui: o container usa o Ollama já instalado no host.
 # Servidor Linux: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 name: rag
@@ -8,8 +10,9 @@ services:
     image: rag-local
     init: true
     restart: unless-stopped
-    ports:
-      - "${PORT:-3000}:3000"
+    user: "${APP_UID:-0}:${APP_GID:-0}"
+    networks:
+      - app_net
     environment:
       NODE_ENV: production
       PORT: 3000
@@ -31,9 +34,11 @@ services:
       DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
     volumes:
-      - rag_data:/app/data
+      - ./data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
-volumes:
-  rag_data:
+networks:
+  app_net:
+    name: app_net
+    external: true

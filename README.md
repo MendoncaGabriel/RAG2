@@ -26,9 +26,11 @@ Acesse http://localhost:3000. Para verificar a compilação TypeScript: `npm run
 
 ### Docker Compose
 
-O app roda em Docker e usa o **Ollama já instalado no host** (o Compose não sobe Ollama). Um comando:
+O app roda só dentro do Docker, na porta interna 3000, **sem publicar porta** no host, e usa o **Ollama já instalado no host** (o Compose não sobe Ollama). A rede `app_net` é externa e precisa existir:
 
 ```bash
+docker network create app_net   # uma única vez
+
 # Windows / macOS (Docker Desktop)
 docker compose up -d --build
 
@@ -36,9 +38,9 @@ docker compose up -d --build
 docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 ```
 
-Acesse http://localhost:3000. Ao iniciar, o container localiza o Ollama do host e baixa os modelos configurados que estiverem faltando (`OLLAMA_AUTO_PULL=false` desativa). Dados (SQLite, uploads, OCR) ficam no volume `rag_data`. Configurações vêm de variáveis de ambiente ou de um `.env` ao lado do compose (veja `.env.example`). Logs: `docker compose logs -f rag`. Para parar: `docker compose down` (os dados permanecem).
+Conecte um proxy (nginx, Caddy, Traefik…) à rede `app_net` apontando para `rag:3000`. Ao iniciar, o container localiza o Ollama do host e baixa os modelos configurados que faltarem (`OLLAMA_AUTO_PULL=false` desativa). Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
 
-No Linux, em vez do arquivo extra, também funciona iniciar o Ollama com `OLLAMA_HOST=0.0.0.0` e usar só o primeiro comando. O arquivo `docker-compose.linux.yml` exige Docker Compose 2.24+.
+No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode: host`), então `app_net` e o nome `rag` não se aplicam: o app fica em `localhost:3000` do servidor. Alternativa sem esse arquivo: iniciar o Ollama com `OLLAMA_HOST=0.0.0.0`. O arquivo exige Docker Compose 2.24+.
 
 ## Configuração
 

@@ -5,8 +5,8 @@
 services:
   rag:
     network_mode: host
-    ports: !reset []
+    networks: !reset []
     extra_hosts: !reset []
     environment:
-      PORT: ${PORT:-3000}
+      PORT: 3000
       OLLAMA_BASE_URL: http://127.0.0.1:11434
