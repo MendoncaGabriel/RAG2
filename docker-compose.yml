@@ -1,19 +1,39 @@
+# Uso: docker compose up -d --build   (depois abra http://localhost:3000)
+# O Ollama NÃO roda aqui: o container usa o Ollama já instalado no host.
+# Servidor Linux: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
+name: rag
 services:
   rag:
     build: .
+    image: rag-local
+    init: true
     restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
     environment:
       NODE_ENV: production
-      DATABASE_PATH: /app/data/database.sqlite
-      UPLOAD_DIR: /app/data/uploads
+      PORT: 3000
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b-instruct}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
+      OLLAMA_AUTO_PULL: ${OLLAMA_AUTO_PULL:-true}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-30m}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-4096}
+      OLLAMA_NUM_PREDICT: ${OLLAMA_NUM_PREDICT:-512}
+      OCR_LANG: ${OCR_LANG:-por+eng}
+      CHUNK_SIZE: ${CHUNK_SIZE:-800}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-120}
+      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-5}
+      MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.18}
+      MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-7500}
+      NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-2}
+      QUERY_EXPANSION: ${QUERY_EXPANSION:-false}
+      DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
     volumes:
-      - ./data:/app/data
+      - rag_data:/app/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    networks:
-      - app_net
 
-networks:
-  app_net:
-    name: app_net
+volumes:
+  rag_data:

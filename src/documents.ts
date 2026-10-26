@@ -9,7 +9,7 @@ import yauzl from "yauzl";
 import { createWorker, PSM } from "tesseract.js";
 import sharp from "sharp";
 import { db, uploadDir } from "./database.js";
-import { embedMany, chunkText } from "./rag.js";
+import { embedMany, chunkText, normalizeText } from "./rag.js";
 
 export function fixMojibake(value: string): string {
   if (!/[ÃÂâð]/.test(value)) return value;
@@ -143,7 +143,7 @@ async function processDocumentNow(id: string, notebookId: string, filePath: stri
       }
       db.prepare("UPDATE documents SET progress=? WHERE id=?").run(20 + Math.round(Math.min(i + 32, chunks.length) / chunks.length * 75), id);
     }
-    const insert = db.prepare("INSERT INTO chunks(id,document_id,notebook_id,content,embedding,dimensions,chunk_index) VALUES(?,?,?,?,?,?,?)");
+    const insert = db.prepare("INSERT INTO chunks(id,document_id,notebook_id,content,embedding,dimensions,chunk_index,search_text) VALUES(?,?,?,?,?,?,?,?)");
     db.exec("BEGIN");
     try {
       if (!db.prepare("SELECT 1 FROM documents WHERE id=? AND notebook_id=?").get(id, notebookId)) {
@@ -151,7 +151,7 @@ async function processDocumentNow(id: string, notebookId: string, filePath: stri
         return;
       }
       db.prepare("DELETE FROM chunks WHERE document_id=?").run(id);
-      chunks.forEach((c, i) => insert.run(crypto.randomUUID(), id, notebookId, c, vectors[i], dims, i));
+      chunks.forEach((c, i) => insert.run(crypto.randomUUID(), id, notebookId, c, vectors[i], dims, i, normalizeText(c)));
        db.prepare("UPDATE documents SET status='processed',progress=100,error=NULL WHERE id=?").run(id);
       db.exec("COMMIT");
     } catch (error) {

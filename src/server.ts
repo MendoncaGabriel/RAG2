@@ -22,7 +22,7 @@ async function refineConversationTitle(id: string, question: string, answer: str
     const result = await ollama("/api/chat", {
       model: process.env.OLLAMA_CHAT_MODEL || "qwen2.5:1.5b-instruct",
       stream: false,
-      keep_alive: process.env.OLLAMA_KEEP_ALIVE || "5m",
+      keep_alive: process.env.OLLAMA_KEEP_ALIVE || "30m",
       options: { temperature: 0.2, top_p: 0.8, num_ctx: 2048, num_predict: 32 },
       messages: [
         { role: "system", content: "Crie um título curto para esta conversa, no mesmo idioma da pergunta. Resuma o assunto em 2 a 6 palavras, no máximo 48 caracteres. Não use aspas, pontuação final nem frases como 'Conversa sobre'. Retorne somente o título." },
@@ -56,7 +56,31 @@ app.post("/api/notebooks/:id/saved-messages",(req,res)=>{ const notebookId=Strin
 app.patch("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const title=String(req.body?.title||"").trim(); if(!title||title.length>120)return res.status(400).json({error:"Título obrigatório (até 120 caracteres)."}); const result=db.prepare("UPDATE saved_messages SET title=? WHERE id=? AND notebook_id=?").run(title,req.params.id,req.params.notebookId); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 app.delete("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const result=db.prepare("DELETE FROM saved_messages WHERE id=? AND notebook_id=?").run(req.params.id,req.params.notebookId); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 app.get("/api/conversations/:id/messages",(req,res)=>res.json(db.prepare("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at").all(req.params.id)));
-app.post("/api/conversations/:id/messages",async(req,res)=>{ const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string}|undefined; if(!conversation)return res.sendStatus(404); const question=String(req.body?.content||"").trim(); if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."}); try{ const previous=db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(conversation.id) as {n:number}; const createTitle=previous.n===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):""; const userId=uuid(); db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question); const result=await ask(conversation.notebook_id,question); const id=uuid(); db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources) VALUES(?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources)); if(createTitle)db.prepare("UPDATE conversations SET title=? WHERE id=? AND title='Nova conversa'").run(fallback,conversation.id); res.json({user:{id:userId,role:"user",content:question},assistant:{id,role:"assistant",content:result.answer,sources:result.sources}}); if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback); }catch(e){fail(res,e)} });
+app.post("/api/conversations/:id/messages",async(req,res)=>{
+  const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string}|undefined;
+  if(!conversation)return res.sendStatus(404);
+  const question=String(req.body?.content||"").trim();
+  if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."});
+  const stream=req.query.stream==="1",started=Date.now();
+  const send=(event:unknown)=>{ if(stream)res.write(JSON.stringify(event)+"\n"); };
+  try{
+    const history=(db.prepare("SELECT role,content FROM (SELECT role,content,created_at,rowid FROM messages WHERE conversation_id=? ORDER BY created_at DESC,rowid DESC LIMIT 4) ORDER BY created_at,rowid").all(conversation.id) as {role:string;content:string}[]);
+    const createTitle=history.length===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
+    const userId=uuid();
+    db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
+    if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
+    const result=await ask(conversation.notebook_id,question,{history,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
+    const id=uuid();
+    const durationMs=Date.now()-started;
+    db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources,duration_ms) VALUES(?,?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources),durationMs);
+    if(createTitle)db.prepare("UPDATE conversations SET title=? WHERE id=? AND title='Nova conversa'").run(fallback,conversation.id);
+    const payload={user:{id:userId,role:"user",content:question},assistant:{id,role:"assistant",content:result.answer,sources:result.sources,duration_ms:durationMs}};
+    if(stream){send({type:"done",...payload});res.end();}else res.json(payload);
+    if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback);
+  }catch(e){
+    if(stream&&res.headersSent){send({type:"error",error:e instanceof Error?e.message:String(e)});res.end();}else fail(res,e);
+  }
+});
 app.get("/api/health/ollama",async(_req,res)=>{try{const data=await ollama("/api/tags");res.json({ok:true,models:data.models?.map((m:any)=>m.name)||[]})}catch(e){res.status(503).json({ok:false,error:e instanceof Error?e.message:String(e)})}});
 app.get("/api/system/info",async(_req,res)=>{
   const dirSize=async(dir:string):Promise<number>=>{let total=0;for(const entry of await fs.readdir(dir,{withFileTypes:true}).catch(()=>[])){const full=path.join(dir,entry.name);if(entry.isDirectory())total+=await dirSize(full);else if(entry.isFile())total+=(await fs.stat(full).catch(()=>({size:0}))).size}return total};

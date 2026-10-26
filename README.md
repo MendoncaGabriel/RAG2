@@ -26,13 +26,19 @@ Acesse http://localhost:3000. Para verificar a compilação TypeScript: `npm run
 
 ### Docker Compose
 
-O Compose não inicia Ollama e não publica portas. Os dados persistem em `./data` e o serviço entra na rede Docker `app_net`:
+O app roda em Docker e usa o **Ollama já instalado no host** (o Compose não sobe Ollama). Um comando:
 
 ```bash
+# Windows / macOS (Docker Desktop)
 docker compose up -d --build
+
+# Servidor Linux (Ollama escutando só em 127.0.0.1, o padrão)
+docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 ```
 
-Configure `OLLAMA_BASE_URL` no ambiente ou em `.env` se necessário. O padrão `http://host.docker.internal:11434` funciona no Docker Desktop; no Linux, o Compose mapeia esse nome para o host, mas o Ollama precisa aceitar conexões vindas do Docker (por exemplo, escutar em `0.0.0.0:11434` e permitir a conexão no firewall). A aplicação não tem porta publicada pelo Compose; para acessá-la, conecte um proxy/serviço à rede `app_net`.
+Acesse http://localhost:3000. Ao iniciar, o container localiza o Ollama do host e baixa os modelos configurados que estiverem faltando (`OLLAMA_AUTO_PULL=false` desativa). Dados (SQLite, uploads, OCR) ficam no volume `rag_data`. Configurações vêm de variáveis de ambiente ou de um `.env` ao lado do compose (veja `.env.example`). Logs: `docker compose logs -f rag`. Para parar: `docker compose down` (os dados permanecem).
+
+No Linux, em vez do arquivo extra, também funciona iniciar o Ollama com `OLLAMA_HOST=0.0.0.0` e usar só o primeiro comando. O arquivo `docker-compose.linux.yml` exige Docker Compose 2.24+.
 
 ## Configuração
 
@@ -54,3 +60,25 @@ Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV
 ## Notas
 
 OCR local de imagens é feito com Tesseract.js, pré-processando rotação, escala, contraste e nitidez. Português e inglês são reconhecidos juntos por padrão (`OCR_LANG=por+eng`; também aceita `por` ou `eng`). A recuperação e as respostas aceitam português e inglês; o idioma da resposta acompanha o idioma da pergunta. PDFs escaneados não são convertidos automaticamente para imagens e, portanto, precisam de OCR externo ou ser enviados como imagens. Os limites podem ser ajustados por `MAX_FILE_SIZE_MB` e o máximo de arquivos por envio é 50. Cada documento é indexado individualmente e cada busca consulta somente o notebook ativo; a conversa não injeta o histórico inteiro ao modelo, limitando o contexto para proteger máquinas modestas. O endpoint Ollama `/api/embed` requer uma versão atual do Ollama. Docker não é obrigatório: Node.js 22.13+ e Ollama podem rodar diretamente no servidor.
+
+## Otimizações para modelos leves (1.5B)
+
+- **Streaming**: a resposta aparece token a token (`POST /api/conversations/:id/messages?stream=1`, NDJSON); sem `stream=1` o comportamento antigo é mantido.
+- **Menos chamadas ao LLM**: a expansão de consulta por LLM agora é opt-in (`QUERY_EXPANSION=true`); por padrão cada pergunta faz 1 embedding + 1 geração.
+- **Memória de conversa**: os últimos turnos entram no prompt, e perguntas de acompanhamento ("e quando termina a fase 1 dele?") são reescritas como perguntas autônomas antes da busca.
+- **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" amostram trechos de todos os documentos em vez de buscar por similaridade.
+- **Precisão**: corte relativo de trechos fracos (< 80% do melhor), prompt mais curto e restritivo, `temperature=0.1` e `repeat_penalty`.
+- **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`, preenchido automaticamente em bases existentes) e `keep_alive=30m` também nos embeddings, evitando recarregar modelos entre embedding e chat.
+
+## Recuperação híbrida
+
+- **Busca híbrida**: BM25 (com stemming leve para português) + similaridade vetorial, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings.
+- **Índice em memória** por notebook, invalidado automaticamente quando documentos mudam: as perguntas deixam de reler e reprocessar o SQLite.
+- **Portão de relevância**: trecho sem nenhum termo em comum com a pergunta só entra se se destacar estatisticamente dos demais (z-score). Perguntas fora do assunto dos documentos são recusadas sem gastar uma chamada ao modelo de chat.
+- **Trechos vizinhos** (`NEIGHBOR_EXPAND_TOP`): os melhores resultados ganham os trechos adjacentes, e trechos contíguos viram uma passagem única, sem repetir o overlap.
+- **Prefixos de embedding**: `nomic-embed-text` (`search_query:`/`search_document:`) e modelos `e5` (`query:`/`passage:`) usam os prefixos para os quais foram treinados. **Reprocesse os documentos** ao adotar esta versão com esses modelos.
+- **Log de tempos** no servidor: `[RAG] busca … · 1º token … · geração …`.
+
+### Dica de desempenho do Ollama
+
+Por padrão o Ollama pode manter só um modelo na memória, trocando entre embedding e chat a cada pergunta (2 a 7 s perdidos). Inicie o Ollama com `OLLAMA_MAX_LOADED_MODELS=2` (no Windows, defina a variável de ambiente e reinicie o Ollama) para manter os dois carregados.
