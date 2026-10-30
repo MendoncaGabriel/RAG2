@@ -6,7 +6,7 @@ import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
 import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
-import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
+import { activeProvider, activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
 const app = express(), upload = multer({ dest: uploadDir, limits: { fileSize: Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024, files: 50 } });
@@ -146,16 +146,19 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
   const question=String(req.body?.content||"").trim();
   if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."});
   const stream=req.query.stream==="1",started=Date.now();
-  const send=(event:unknown)=>{ if(stream)res.write(JSON.stringify(event)+"\n"); };
+  const send=(event:unknown)=>{ if(stream&&!res.destroyed)res.write(JSON.stringify(event)+"\n"); };
+  // Cliente desconectado (botão parar): cancela a geração no provedor.
+  const abort=new AbortController();res.on("close",()=>{if(!res.writableFinished)abort.abort()});
   try{
-    // Só as mensagens ainda não cobertas pelo resumo (no máximo 6) entram como histórico.
+    // Ollama (modelos locais pequenos): sem mensagens anteriores nem resumo no prompt. Os demais provedores mantêm o histórico.
+    const local=activeProvider("chat")?.kind==="ollama";
     const total=(db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(conversation.id) as {n:number}).n;
-    const history=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(conversation.summary_count,total-6)) as {role:string;content:string}[];
-    const createTitle=history.length===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
+    const history=local?[]:db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(conversation.summary_count,total-6)) as {role:string;content:string}[];
+    const createTitle=total===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
-    const result=await ask(conversation.notebook_id,question,{history,summary:conversation.summary,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
+    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,summary:local?"":conversation.summary,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
     const id=uuid();
     const durationMs=Date.now()-started;
     db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources,duration_ms) VALUES(?,?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources),durationMs);
@@ -164,8 +167,9 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     if(stream){send({type:"done",...payload});res.end();}else res.json(payload);
     if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback);
     trimConversationQueue(conversation.id);
-    void updateConversationSummary(conversation.id);
+    if(!local)void updateConversationSummary(conversation.id);
   }catch(e){
+    if(abort.signal.aborted)return;
     if(stream&&res.headersSent){send({type:"error",error:e instanceof Error?e.message:String(e)});res.end();}else fail(res,e);
   }
 });

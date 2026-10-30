@@ -87,8 +87,8 @@ export function activeSummary() {
 }
 
 // ---------- HTTP ----------
-async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number }) {
-  const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${e?.cause?.code || e?.message || e}).`); });
+async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number; signal?: AbortSignal }) {
+  const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(init.timeout ?? 180_000)]) : AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${e?.cause?.code || e?.message || e}).`); });
   return res;
 }
 // Erro HTTP legível; no Ollama, modelo ausente vira instrução de como baixar ou trocar.
@@ -117,7 +117,7 @@ async function readLines(res: Response, handle: (payload: string) => void) {
 
 // ---------- Chat ----------
 export type Msg = { role: "system" | "user" | "assistant"; content: string };
-export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean }
+export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal }
 
 export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token: string) => void): Promise<string> {
   let full = "";
@@ -126,8 +126,8 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
   const turns = opts.messages.filter(m => m.role !== "system");
   const label = providerKinds[p.kind].label;
   if (p.kind === "ollama") {
-    const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, json: {
-      model: p.chatModel, stream: true, keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
+    const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, signal: opts.signal, json: {
+      model: p.chatModel, stream: true, think: false, keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
       options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}) },
       messages: opts.messages,
     } });
@@ -138,7 +138,7 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
     let res: Response;
     // Modelos novos da OpenAI exigem max_completion_tokens e rejeitam temperature; ajusta e repete.
     for (let attempt = 0; ; attempt++) {
-      res = await http(label, `${p.baseUrl}/chat/completions`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, json: body });
+      res = await http(label, `${p.baseUrl}/chat/completions`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, signal: opts.signal, json: body });
       if (res.status !== 400 || attempt >= 2) break;
       const text = await res.clone().text();
       if (/max_completion_tokens/.test(text) && "max_tokens" in body) { delete body.max_tokens; body.max_completion_tokens = maxTokens; }
@@ -148,14 +148,14 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
     if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
     await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error.message || JSON.stringify(c.error)}`); emit(String(c.choices?.[0]?.delta?.content || "")); });
   } else if (p.kind === "anthropic") {
-    const res = await http(label, `${p.baseUrl}/messages`, { headers: { "x-api-key": p.apiKey, "anthropic-version": "2023-06-01" }, timeout: 600_000, json: {
+    const res = await http(label, `${p.baseUrl}/messages`, { headers: { "x-api-key": p.apiKey, "anthropic-version": "2023-06-01" }, timeout: 600_000, signal: opts.signal, json: {
       model: p.chatModel, max_tokens: maxTokens, stream: true, temperature: opts.temperature ?? 0.1, ...(system ? { system } : {}), messages: turns,
     } });
     if (!res.ok || !res.body) throw new Error(`${label} (${res.status}): ${(await res.text()).slice(0, 500)}`);
     await readLines(res, line => { const c = JSON.parse(line); if (c.type === "error") throw new Error(`${label}: ${c.error?.message || "erro"}`); if (c.type === "content_block_delta") emit(String(c.delta?.text || "")); });
   } else {
     const model = p.chatModel.replace(/^models\//, "");
-    const res = await http(label, `${p.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, { headers: { "x-goog-api-key": p.apiKey }, timeout: 600_000, json: {
+    const res = await http(label, `${p.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, { headers: { "x-goog-api-key": p.apiKey }, timeout: 600_000, signal: opts.signal, json: {
       ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
       contents: turns.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] })),
       generationConfig: { temperature: opts.temperature ?? 0.1, topP: opts.topP ?? 0.8,

@@ -11,7 +11,13 @@ const clean = (t: string) => t.replace(/`|\*\*/g, "").trim();
 const stop = new Set(["com", "como", "para", "pela", "pelo", "que", "qual", "quais", "quando", "onde", "sobre", "seus", "suas", "este", "esta", "isso", "essa", "dos", "das", "nos", "nas", "sao", "tem", "tém", "têm", "possuem", "possui", "estao", "esta", "foram", "foi", "ser", "uma", "uns", "umas", "todo", "toda", "todos", "todas", "liste", "listar", "lista", "enumere", "mostre", "quantos", "quantas", "qual", "media", "medio", "soma", "total", "valor", "acima", "abaixo", "superior", "inferior", "maior", "menor", "mais", "menos", "ordene", "ordem", "registrado", "registrados", "registradas", "existem", "ha", "the", "and", "for"]);
 const stem = (t: string) => t.replace(/s$/, "").slice(0, 6);
 const stems = (t: string) => (norm(t).match(/[\p{L}\p{N}]{3,}/gu) || []).filter(w => !stop.has(w)).map(stem);
-export const extractCodes = (t: string) => [...new Set((t.match(/\b[A-Za-z]{2,10}(?:-[A-Za-z0-9]+)+\b/g) || []).filter(c => /[A-Z]/.test(c) || /\d/.test(c)).map(c => c.toUpperCase()))];
+// Código = segmentos em maiúsculas/dígitos ("PRJ-ARARA", "CTR-2026-018") ou digitado todo em minúsculas ("prj-arara").
+// Palavras compostas mistas como "RTO-alvo" ou "Sextas-feiras" não são códigos.
+export const extractCodes = (t: string) => [...new Set((t.match(/\b[A-Za-z]{2,10}(?:-[A-Za-z0-9]+)+\b/g) || []).filter(c => {
+  const parts = c.split("-");
+  const upper = parts.every(x => /^[A-Z0-9]+$/.test(x)), lower = parts.every(x => /^[a-z0-9]+$/.test(x));
+  return (upper || lower) && /^[A-Za-z]{2,10}$/.test(parts[0]) && (upper || /\d/.test(c) || parts[0].length <= 4);
+}).map(c => c.toUpperCase()))];
 
 // ---------- Extração ----------
 const headingRe = /^(#{1,6})\s+(.+?)\s*$/;
@@ -250,6 +256,7 @@ export function structuredQuery(notebookId: string, question: string, intent = a
     return filters;
   };
 
+  let lookup: { t: Table; rows: RecordRow[] } | null = null;
   for (const { t, topic } of scored) {
     if (topic < 1) break;
     // "Quantos dias de retenção…" não é contagem de registros: exige que o objeto contado seja o assunto da tabela.
@@ -289,7 +296,11 @@ export function structuredQuery(notebookId: string, question: string, intent = a
       if (!valueCol) continue;
     }
     const isLookup = !intent.comparator && !intent.aggregate && !intent.order && !(intent.list && filters.length && rows.length > 1) && !(intent.list && !filters.length && topic >= 2);
-    if (isLookup) continue;
+    if (isLookup) {
+      // Pergunta pontual ("RTO do Tier 2", "código do Armazém Claro"): o registro inteiro vai ao modelo, sem misturar linhas.
+      if (filters.length && rows.length >= 1 && rows.length <= 3 && !lookup) lookup = { t, rows };
+      continue;
+    }
     if (!rows.length) {
       return { kind: "direct", answer: `Nenhum registro de "${t.title}" atende ao critério (${steps.join("; ") || "sem filtro"}).`, sources: [sourceOf(t, t.rows, "Fonte 1")] };
     }
@@ -323,6 +334,10 @@ export function structuredQuery(notebookId: string, question: string, intent = a
     return { kind: "direct", answer: lines.join("\n"), sources: [sourceOf(t, rows, "Fonte 1")] };
   }
 
+  if (lookup && !codeSet.size) {
+    const { t, rows } = lookup;
+    return { kind: "records", block: rows.map(r => `[Registro: ${t.title}] ${rowText(t, r)}`).join("\n"), sources: rows.map((r, k) => sourceOf(t, [r], `Registro ${k + 1}`)) };
+  }
   // Busca por código exato: entrega o registro completo para o modelo não misturar atributos de linhas vizinhas.
   if (codeSet.size) {
     const hits: { t: Table; r: RecordRow }[] = [];
