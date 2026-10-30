@@ -24,19 +24,19 @@ Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) par
 
 ### Docker Compose
 
-O app roda só dentro do Docker, na porta interna 3000, **sem publicar porta** no host (o Compose não sobe nenhuma IA; use a tela de Configurações). A rede `app_net` é externa e precisa existir:
+Um único comando sobe tudo: o app, um Ollama e o download dos modelos (`qwen2.5:1.5b` para chat e `bge-m3` para embeddings, ~2 GB na primeira vez; acompanhe com `docker compose logs -f ollama-init`). O app inicia só depois do download e já vem com o provedor "Ollama (local)" cadastrado e ativo. Os modelos podem ser trocados com `OLLAMA_CHAT_MODEL` e `OLLAMA_EMBEDDING_MODEL` no `.env`.
 
 ```bash
-docker network create app_net   # uma única vez
+docker compose up -d --build   # http://localhost:3000 (porta configurável com PORT)
+```
 
-# Windows / macOS (Docker Desktop)
-docker compose up -d --build
+O `docker-compose.linux.yml` (`network_mode: host`) não alcança o Ollama do Compose por nome; use-o apenas com IA externa:
 
-# Servidor Linux com IA local escutando só em 127.0.0.1
+```bash
 docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 ```
 
-Conecte um proxy (nginx, Caddy, Traefik…) à rede `app_net` apontando para `rag:3000`. Para usar um Ollama do host, cadastre-o com a URL `http://host.docker.internal:11434`. Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
+Para usar um proxy (nginx, Caddy, Traefik…), conecte-o à rede `app_net` apontando para `rag:3000`. Para usar um Ollama do host, cadastre-o com a URL `http://host.docker.internal:11434`. Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
 
 No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode: host`), então `app_net` e o nome `rag` não se aplicam: o app fica em `localhost:3000` do servidor. Nesse modo cadastre o Ollama como `http://127.0.0.1:11434`. Alternativa sem esse arquivo: iniciar o Ollama com `OLLAMA_HOST=0.0.0.0`. O arquivo exige Docker Compose 2.24+.
 

@@ -1,10 +1,38 @@
-# Uso: docker network create app_net   (uma única vez)
-#      docker compose up -d --build
-# Nenhuma porta é publicada: o app escuta em 3000 dentro da rede app_net (acesse por um proxy nessa rede).
-# A IA (Ollama, OpenAI, Gemini…) é cadastrada na tela de Configurações do app.
-# Servidor Linux com IA local no próprio servidor: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
+# Uso: docker compose up -d --build   -> app em http://localhost:${PORT:-3000}
+# Sobe junto o Ollama e baixa os modelos de chat e embeddings (primeira vez: alguns minutos, ~2 GB).
+# Na primeira inicialização o app já cadastra e ativa esse Ollama; outros provedores podem ser adicionados em Configurações.
+# O app só inicia depois que os modelos terminam de baixar. Acompanhe com: docker compose logs -f ollama-init
+# Obs.: docker-compose.linux.yml (network_mode host) não alcança o Ollama por nome; use-o só com IA externa.
 name: rag
 services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    networks:
+      - app_net
+    volumes:
+      - ./data/ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+
+  # Baixa os modelos (idempotente: nada é baixado de novo se já existirem) e encerra.
+  ollama-init:
+    image: ollama/ollama:latest
+    restart: "no"
+    networks:
+      - app_net
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
+    entrypoint: ["/bin/sh", "-c", "ollama pull $$OLLAMA_CHAT_MODEL && ollama pull $$OLLAMA_EMBEDDING_MODEL"]
+
   rag:
     build: .
     image: rag-local
@@ -13,6 +41,11 @@ services:
     user: "${APP_UID:-0}:${APP_GID:-0}"
     networks:
       - app_net
+    ports:
+      - "${PORT:-3000}:3000"
+    depends_on:
+      ollama-init:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       MASTER_USER: ${MASTER_USER:?defina MASTER_USER no .env}
@@ -22,6 +55,9 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       TRUST_PROXY: ${TRUST_PROXY:-true}
       PORT: 3000
+      OLLAMA_BASE_URL: http://ollama:11434
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
       OCR_LANG: ${OCR_LANG:-por+eng}
       CHUNK_SIZE: ${CHUNK_SIZE:-700}
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
@@ -42,4 +78,3 @@ services:
 networks:
   app_net:
     name: app_net
-    external: true

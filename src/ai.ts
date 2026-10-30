@@ -86,6 +86,13 @@ export function activeSummary() {
   return { chat: one("chat"), embedding: one("embedding") };
 }
 
+// Primeira inicialização (sem nenhum provedor): cadastra e ativa o Ollama indicado por OLLAMA_BASE_URL (ex.: o serviço do docker compose).
+const seedBase = (process.env.OLLAMA_BASE_URL || "").trim();
+if (seedBase && !(db.prepare("SELECT COUNT(*) AS n FROM ai_providers").get() as { n: number }).n) {
+  const p = createProvider({ name: "Ollama (local)", kind: "ollama", baseUrl: seedBase, chatModel: process.env.OLLAMA_CHAT_MODEL || "qwen2.5:1.5b", embeddingModel: process.env.OLLAMA_EMBEDDING_MODEL || "bge-m3" });
+  setActive({ chat: p.id, embedding: p.id });
+}
+
 // ---------- HTTP ----------
 async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number; signal?: AbortSignal }) {
   const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(init.timeout ?? 180_000)]) : AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${e?.cause?.code || e?.message || e}).`); });

@@ -16,7 +16,7 @@ npm test           # testes determinísticos (sem LLM): chunking, registros, fil
 npm run bench -- --label nova --out bench.json   # benchmark ponta a ponta com Ollama (qwen2.5:1.5b + bge-m3)
 npm run build      # tsc -> dist/
 npm start          # node dist/server.js
-docker compose up -d --build   # rede externa "app_net" precisa existir; dados em ./data
+docker compose up -d --build   # sobe app + Ollama + modelos (OLLAMA_*); dados em ./data
 ```
 
 Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Base_RAG_Verdanis.md` e o gabarito `tests/fixtures/bench_questions.json`; `--src <dir>` mede outra cópia do código.
