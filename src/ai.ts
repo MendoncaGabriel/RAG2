@@ -128,7 +128,7 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
   if (p.kind === "ollama") {
     const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, json: {
       model: p.chatModel, stream: true, keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
-      options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens },
+      options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}) },
       messages: opts.messages,
     } });
     if (!res.ok || !res.body) throw await httpError(label, res, p.chatModel);

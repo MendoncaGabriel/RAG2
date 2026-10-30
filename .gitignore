@@ -1,7 +1,28 @@
+# Dependências e build
 node_modules/
 dist/
+*.tsbuildinfo
+
+# Dados locais (banco SQLite, uploads, dados de OCR)
 data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Segredos e configuração local
 .env
 .env.*
 !.env.example
+
+# Logs
 npm-debug.log*
+*.log
+
+# Claude Code (configuração local)
+.claude/settings.local.json
+
+# Sistema e editores
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

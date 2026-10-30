@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS messages(id TEXT PRIMARY KEY, conversation_id TEXT NO
 CREATE TABLE IF NOT EXISTS saved_messages(id TEXT PRIMARY KEY, notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE, message_id TEXT NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE, title TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 `);
 try { db.exec("ALTER TABLE documents ADD COLUMN progress INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN chunks_done INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN chunks_total INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE saved_messages ADD COLUMN embedding BLOB"); } catch {}
 try { db.exec("ALTER TABLE saved_messages ADD COLUMN dimensions INTEGER"); } catch {}
 try { db.exec("ALTER TABLE saved_messages ADD COLUMN index_error TEXT"); } catch {}
@@ -27,3 +29,11 @@ try { db.exec("ALTER TABLE messages ADD COLUMN duration_ms INTEGER"); } catch {}
 try { db.exec("ALTER TABLE conversations ADD COLUMN summary TEXT NOT NULL DEFAULT ''"); } catch {}
 try { db.exec("ALTER TABLE conversations ADD COLUMN summary_count INTEGER NOT NULL DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE notebooks ADD COLUMN is_public INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE chunks ADD COLUMN section TEXT"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN source_text TEXT"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN chunk_version INTEGER NOT NULL DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE documents ADD COLUMN records_version INTEGER NOT NULL DEFAULT 0"); } catch {}
+// Registros estruturados (linhas de tabelas e fichas) para filtros, contagens e cálculos determinísticos.
+db.exec(`CREATE TABLE IF NOT EXISTS records(id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE, table_key TEXT NOT NULL, title TEXT NOT NULL, headers TEXT NOT NULL, fields TEXT NOT NULL, row_index INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS records_notebook ON records(notebook_id);
+CREATE INDEX IF NOT EXISTS records_document ON records(document_id);`);

@@ -7,7 +7,7 @@ import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
 import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
-import { fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
+import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
 const app = express(), upload = multer({ dest: uploadDir, limits: { fileSize: Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024, files: 50 } });
 if (process.env.TRUST_PROXY === "true") app.set("trust proxy", 1);
@@ -91,7 +91,8 @@ function trimConversationQueue(id: string) {
 // Resumo rolante: mantém a janela recente fora do resumo e condensa o que sai dela, em lotes (1 chamada a cada ~2 trocas).
 const summarizing = new Set<string>();
 async function updateConversationSummary(id: string) {
-  if (summarizing.has(id)) return;
+  // O resumo é uma geração extra que disputa a CPU com a próxima pergunta; CONVERSATION_SUMMARY=false desliga.
+  if (process.env.CONVERSATION_SUMMARY === "false" || summarizing.has(id)) return;
   summarizing.add(id);
   try {
     const c = db.prepare("SELECT summary,summary_count FROM conversations WHERE id=?").get(id) as { summary: string; summary_count: number } | undefined;
@@ -109,12 +110,14 @@ async function updateConversationSummary(id: string) {
 }
 // Recupera de desligamentos enquanto um arquivo estava sendo indexado.
 db.prepare("UPDATE documents SET status='failed',error='Processamento interrompido; clique em Reprocessar.' WHERE status='processing'").run();
+// Documentos indexados antes dos registros estruturados ganham tabelas/fichas consultáveis sem reindexar embeddings.
+setTimeout(() => { backfillRecords().catch(e => console.warn("Falha na migração de registros:", e)); }, 2_000);
 
 app.get("/api/notebooks", (_req,res)=>res.json(db.prepare("SELECT n.*, (SELECT count(*) FROM documents d WHERE d.notebook_id=n.id) document_count FROM notebooks n ORDER BY created_at DESC").all()));
 app.post("/api/notebooks", (req,res)=>{ const name=String(req.body?.name||"").trim(); if(!name||name.length>120)return res.status(400).json({error:"Nome obrigatório (até 120 caracteres)."}); const id=uuid(); db.prepare("INSERT INTO notebooks(id,name,description) VALUES(?,?,?)").run(id,name,String(req.body.description||"")); res.status(201).json(db.prepare("SELECT * FROM notebooks WHERE id=?").get(id)); });
 app.patch("/api/notebooks/:id", (req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const name=String(req.body?.name||"").trim(); if(!name||name.length>120)return res.status(400).json({error:"Nome obrigatório (até 120 caracteres)."}); db.prepare("UPDATE notebooks SET name=?,description=? WHERE id=?").run(name,String(req.body.description||""),req.params.id); res.json({ok:true}); });
 app.delete("/api/notebooks/:id", async(req,res)=>{ const files=db.prepare("SELECT path FROM documents WHERE notebook_id=?").all(req.params.id) as {path:string|null}[]; if(!existsNotebook(req.params.id))return res.sendStatus(404); db.prepare("DELETE FROM notebooks WHERE id=?").run(req.params.id); for(const f of files)if(f.path)try{await fs.unlink(f.path)}catch{} res.json({ok:true}); });
-app.get("/api/notebooks/:id/documents",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const docs=db.prepare("SELECT id,name,type,status,error,progress,created_at FROM documents WHERE notebook_id=? ORDER BY created_at DESC").all(req.params.id) as any[]; res.json(docs.map(d=>({...d,name:fixMojibake(d.name)}))); });
+app.get("/api/notebooks/:id/documents",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const docs=db.prepare("SELECT id,name,type,status,error,progress,chunks_done,chunks_total,created_at FROM documents WHERE notebook_id=? ORDER BY created_at DESC").all(req.params.id) as any[]; res.json(docs.map(d=>({...d,name:fixMojibake(d.name)}))); });
 app.post("/api/notebooks/:id/documents",upload.array("files",50),async(req,res)=>{ const notebookId=String(req.params.id),files=(req.files||[]) as Express.Multer.File[]; if(!existsNotebook(notebookId)){await Promise.all(files.map(f=>fs.unlink(f.path)));return res.sendStatus(404)} if(!files.length)return res.status(400).json({error:"Nenhum arquivo enviado."}); const accepted=files.map(file=>{const id=uuid(),name=fixMojibake(file.originalname);db.prepare("INSERT INTO documents(id,notebook_id,name,type,path) VALUES(?,?,?,?,?)").run(id,notebookId,name,path.extname(name).toLowerCase().slice(1),file.path);return {id,name,status:"processing"}});res.status(202).json({files:accepted});for(let i=0;i<files.length;i++)processDocument(accepted[i].id,notebookId,files[i].path,accepted[i].name).catch(e=>console.error("Processamento:",e)); });
 app.post("/api/notebooks/:id/text",async(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const text=String(req.body?.text||"").trim(), name=String(req.body?.name||"Texto colado").trim(); if(!text||text.length>1_000_000)return res.status(400).json({error:"Texto obrigatório (máximo de 1 MB)."}); const id=uuid(); db.prepare("INSERT INTO documents(id,notebook_id,name,type,status) VALUES(?,?,?,'text','processing')").run(id,req.params.id,name); res.status(202).json({id,status:"processing"}); processDocument(id,req.params.id,null,name,text).catch(e=>console.error("Processamento:",e)); });
 app.post("/api/documents/:id/reprocess",async(req,res)=>{ const d=db.prepare("SELECT * FROM documents WHERE id=?").get(req.params.id) as any; if(!d)return res.sendStatus(404); db.prepare("UPDATE documents SET status='processing',error=NULL WHERE id=?").run(d.id); res.status(202).json({status:"processing"}); processDocument(d.id,d.notebook_id,d.path,d.name).catch(e=>console.error("Reprocessamento:",e)); });
@@ -122,7 +125,7 @@ app.post("/api/documents/:id/reprocess",async(req,res)=>{ const d=db.prepare("SE
 const reindexing = new Set<string>();
 app.post("/api/notebooks/:id/reindex",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); if(reindexing.has(nb))return res.status(409).json({error:"A reindexação já está em andamento."});
   const ids=(db.prepare("SELECT DISTINCT d.id FROM documents d JOIN chunks c ON c.document_id=d.id WHERE d.notebook_id=? ORDER BY d.created_at").all(nb) as {id:string}[]).map(r=>r.id);
-  ids.forEach(id=>db.prepare("UPDATE documents SET status='processing',progress=0,error=NULL WHERE id=?").run(id));
+  ids.forEach(id=>db.prepare("UPDATE documents SET status='processing',progress=0,chunks_done=0,chunks_total=0,error=NULL WHERE id=?").run(id));
   db.prepare("UPDATE saved_messages SET embedding=NULL,dimensions=NULL,index_error=NULL WHERE notebook_id=?").run(nb); invalidateIndex(nb);
   reindexing.add(nb); res.status(202).json({documents:ids.length});
   void (async()=>{ for(const id of ids){ try{await reindexDocument(id)}catch(e){console.error("Reindexação:",e instanceof Error?e.message:String(e))} }
