@@ -185,7 +185,7 @@ export async function embedWith(p: Provider, inputs: string[], kind: "query" | "
   const label = providerKinds[p.kind].label, model = p.embeddingModel;
   let vectors: number[][];
   if (p.kind === "ollama") {
-    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t), keep_alive: "30m" } }), model);
+    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t), keep_alive: "30m", ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { options: { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } } : {}) } }), model);
     vectors = data.embeddings;
   } else if (p.kind === "openai") {
     const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/embeddings`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t) } }));

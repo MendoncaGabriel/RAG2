@@ -145,7 +145,7 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
   if(!conversation)return res.sendStatus(404);
   const question=String(req.body?.content||"").trim();
   if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."});
-  const stream=req.query.stream==="1",started=Date.now();
+  const stream=req.query.stream==="1",started=Date.now();let chunks=0,firstAt=0,lastAt=0;
   const send=(event:unknown)=>{ if(stream&&!res.destroyed)res.write(JSON.stringify(event)+"\n"); };
   // Cliente desconectado (botão parar): cancela a geração no provedor.
   const abort=new AbortController();res.on("close",()=>{if(!res.writableFinished)abort.abort()});
@@ -158,12 +158,14 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
-    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,summary:local?"":conversation.summary,onToken:token=>send({type:"token",token}),onSources:sources=>send({type:"sources",sources})});
+    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,summary:local?"":conversation.summary,detailed:req.body?.detailed===true,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:sources=>send({type:"sources",sources})});
     const id=uuid();
     const durationMs=Date.now()-started;
-    db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources,duration_ms) VALUES(?,?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources),durationMs);
+    // Aproximação: cada pedaço de streaming ≈ 1 token; respostas determinísticas (1 pedaço) não têm taxa.
+    const tokensPerSec=chunks>=5&&lastAt>firstAt?Math.round((chunks-1)/((lastAt-firstAt)/1000)*10)/10:null;
+    db.prepare("INSERT INTO messages(id,conversation_id,role,content,sources,duration_ms,tokens_per_sec) VALUES(?,?,?,?,?,?,?)").run(id,conversation.id,"assistant",result.answer,JSON.stringify(result.sources),durationMs,tokensPerSec);
     if(createTitle)db.prepare("UPDATE conversations SET title=? WHERE id=? AND title='Nova conversa'").run(fallback,conversation.id);
-    const payload={user:{id:userId,role:"user",content:question},assistant:{id,role:"assistant",content:result.answer,sources:result.sources,duration_ms:durationMs}};
+    const payload={user:{id:userId,role:"user",content:question},assistant:{id,role:"assistant",content:result.answer,sources:result.sources,duration_ms:durationMs,tokens_per_sec:tokensPerSec}};
     if(stream){send({type:"done",...payload});res.end();}else res.json(payload);
     if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback);
     trimConversationQueue(conversation.id);

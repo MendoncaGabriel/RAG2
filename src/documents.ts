@@ -109,7 +109,9 @@ const embedConcurrency = () => Math.min(6, Math.max(1, Number(process.env.EMBED_
 
 // Gera os embeddings em lotes, com lotes em paralelo quando o provedor permite, e grava o progresso real na ordem.
 // Retorna null se o documento foi excluído no meio do processamento.
-async function embedChunks(texts: string[], id: string, aliveSql: string, aliveArgs: string[], base = 25): Promise<number[][] | null> {
+async function embedChunks(allTexts: string[], id: string, aliveSql: string, aliveArgs: string[], base = 25): Promise<number[][] | null> {
+  // Trechos idênticos (cabeçalhos repetidos, tabelas) são embeddados uma só vez e o vetor é reaproveitado.
+  const texts = [...new Set(allTexts)];
   const EMBED_BATCH = embedBatch();
   const batches = Array.from({ length: Math.ceil(texts.length / EMBED_BATCH) }, (_, i) => texts.slice(i * EMBED_BATCH, (i + 1) * EMBED_BATCH));
   const results: number[][][] = new Array(batches.length);
@@ -118,8 +120,9 @@ async function embedChunks(texts: string[], id: string, aliveSql: string, aliveA
   const report = () => {
     let ready = 0; while (ready < batches.length && finished[ready]) ready++;
     const done = Math.min(texts.length, ready * EMBED_BATCH);
+    const shown = Math.round(done / texts.length * allTexts.length);
     // Escala única: extração 0–25%, embeddings 25–95%, gravação 95–100%.
-    db.prepare("UPDATE documents SET progress=?,chunks_done=? WHERE id=?").run(Math.round((base + done / texts.length * (95 - base)) * 10) / 10, done, id);
+    db.prepare("UPDATE documents SET progress=?,chunks_done=? WHERE id=?").run(Math.round((base + done / texts.length * (95 - base)) * 10) / 10, shown, id);
   };
   const worker = async () => {
     while (!gone && failure === undefined) {
@@ -133,9 +136,10 @@ async function embedChunks(texts: string[], id: string, aliveSql: string, aliveA
   await Promise.all(Array.from({ length: Math.min(embedConcurrency(), batches.length) }, worker));
   if (failure !== undefined) throw failure;
   if (gone) return null;
-  const vectors = results.flat();
-  if (new Set(vectors.map(v => v.length)).size !== 1) throw new Error("Dimensão de embedding inconsistente.");
-  return vectors;
+  const unique = results.flat();
+  if (new Set(unique.map(v => v.length)).size !== 1) throw new Error("Dimensão de embedding inconsistente.");
+  const byText = new Map(texts.map((t, i) => [t, unique[i]]));
+  return allTexts.map(t => byText.get(t)!);
 }
 
 // Versão do chunking: 1 = estrutural (seções, tabelas com cabeçalho, listas). Documentos antigos seguem funcionando
