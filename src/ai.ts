@@ -124,7 +124,7 @@ async function readLines(res: Response, handle: (payload: string) => void) {
 
 // ---------- Chat ----------
 export type Msg = { role: "system" | "user" | "assistant"; content: string };
-export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal }
+export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; topK?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal }
 
 export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token: string) => void): Promise<string> {
   let full = "";
@@ -135,7 +135,7 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
   if (p.kind === "ollama") {
     const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, signal: opts.signal, json: {
       model: p.chatModel, stream: true, think: false, keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
-      options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}) },
+      options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, ...(opts.topK ? { top_k: opts.topK } : {}), repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}) },
       messages: opts.messages,
     } });
     if (!res.ok || !res.body) throw await httpError(label, res, p.chatModel);
@@ -192,7 +192,7 @@ export async function embedWith(p: Provider, inputs: string[], kind: "query" | "
   const label = providerKinds[p.kind].label, model = p.embeddingModel;
   let vectors: number[][];
   if (p.kind === "ollama") {
-    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t), keep_alive: "30m" } }), model);
+    const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t), keep_alive: "30m", ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { options: { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } } : {}) } }), model);
     vectors = data.embeddings;
   } else if (p.kind === "openai") {
     const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/embeddings`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embedPrefix(model, kind) + t) } }));
