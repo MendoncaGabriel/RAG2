@@ -311,6 +311,7 @@ function modelProfile(p: ReturnType<typeof activeProvider>) {
 }
 
 // O Ollama recarrega o modelo quando num_ctx muda entre chamadas; todas as chamadas de chat usam o mesmo valor para evitar esse custo.
+export const generationProfile = () => modelProfile(activeProvider("chat"));
 export const chatContext = () => modelProfile(activeProvider("chat")).contextTokens;
 
 // Cache de embeddings de consulta: perguntas repetidas (apresentações, testes, "tentar de novo") não recalculam o vetor.
