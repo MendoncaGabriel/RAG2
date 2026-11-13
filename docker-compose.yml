@@ -69,6 +69,12 @@ services:
       CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
       OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-6}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
+      # Modo de voz: modelos baixados no 1º uso para ./data/voice.
+      VOICE_ENABLED: ${VOICE_ENABLED:-true}
+      VOICE_STT_MODEL: ${VOICE_STT_MODEL:-parakeet}
+      VOICE_STT_LANGUAGE: ${VOICE_STT_LANGUAGE:-pt}
+      VOICE_NUM_THREADS: ${VOICE_NUM_THREADS:-4}
+      VOICE_HF_URL: ${VOICE_HF_URL:-https://huggingface.co}
     volumes:
       - ./data:/app/data
     # Permite cadastrar o Ollama do host (ex.: http://host.docker.internal:11434) nas Configurações.

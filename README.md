@@ -56,6 +56,17 @@ No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode
 
 Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV, TXT, Markdown, JSON, código, HTML/XML e imagens PNG/JPG/WebP/BMP/TIFF) ou texto colado e aguarde o estado `processed`. É possível selecionar vários arquivos por envio (até 50), cada um de até 100 MB por padrão. Documentos com erro podem ser reprocessados pela interface. Abra uma conversa e pergunte; a primeira troca gera automaticamente um título curto para a conversa. Mensagens salvas podem ser abertas para leitura e também são indexadas como contexto do notebook; remover uma mensagem da lista de salvas não apaga a mensagem original da conversa. A resposta inclui trechos-fontes recuperados. Conversas, documentos e vetores permanecem após reiniciar o servidor. Excluir documento remove seus chunks/vetores e tenta remover o arquivo original; excluir notebook remove seus dados associados.
 
+## Modo de voz
+
+No notebook, o botão **Voz** (ao lado de Enviar, ou `Ctrl+Shift+Espaço`) abre uma conversa falada em tela cheia: você fala, o Bento detecta a pausa, transcreve, pergunta ao notebook pelo mesmo caminho do chat (a troca fica salva na conversa) e responde em voz alta, frase a frase, enquanto o modelo ainda escreve. Espaço interrompe ou envia na hora, M pausa o microfone e Esc fecha. Em **Voz e efeitos** dá para trocar a voz, a velocidade, o efeito (Jarvis, sutil ou natural), a pausa que encerra a fala e ativar a interrupção por voz (recomendado com fone, para o microfone não captar a própria resposta).
+
+Tudo roda localmente no servidor com [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), sem serviços externos:
+
+- **Transcrição:** NVIDIA Parakeet TDT 0.6B v3 (int8; ~0,3 s por pergunta curta em CPU, detecta português/inglês e pontua). `VOICE_STT_MODEL=whisper-base` é a opção leve para servidores com pouca memória.
+- **Voz:** Piper (VITS) pt-BR — Faber, Cadu ou Jeff — e britânica (Alan ou Northern) para respostas em inglês; ~0,1–0,3 s por frase. Números, moeda, datas e horas são normalizados antes da síntese.
+
+Na primeira abertura os modelos são baixados do Hugging Face para `VOICE_DIR` (`./data/voice`; ~740 MB, com progresso na tela). Para baixar antes: `npm run voice:download` (ou `npm run voice:download -- cadu alan`). Com Parakeet, o modo de voz ocupa ~1 GB de RAM depois de aberto pela primeira vez. **O navegador só libera o microfone em HTTPS ou em `http://localhost`**: para acessar pela rede, use um proxy com TLS. Variáveis: `VOICE_ENABLED`, `VOICE_DIR`, `VOICE_STT_MODEL`, `VOICE_STT_LANGUAGE` (só Whisper), `VOICE_NUM_THREADS`, `VOICE_HF_URL` (espelho do Hugging Face).
+
 ## API
 
 - `GET/POST /api/notebooks`, `PATCH/DELETE /api/notebooks/:id`
@@ -65,6 +76,7 @@ Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV
 - `GET /api/conversations/:id/messages`, `POST /api/conversations/:id/messages` (`content`)
 - `GET/POST /api/ai/providers`, `PUT/DELETE /api/ai/providers/:id`, `POST /api/ai/providers/:id/test`, `POST /api/ai/models`
 - `GET /api/ai/status`, `PUT /api/ai/active` (`{chat, embedding}` com ids de provedores)
+- `GET /api/voice/status`, `POST /api/voice/prepare` (`{voice, voiceEn}`: baixa/carrega os modelos), `POST /api/voice/transcribe` (PCM 16 bits, 16 kHz, mono → `{text}`), `POST /api/voice/speak` (`{text, voice, voiceEn, speed}` → WAV)
 
 ## Notas
 

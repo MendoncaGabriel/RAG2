@@ -11,7 +11,8 @@
     "start": "node --use-system-ca dist/server.js",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.mts",
-    "bench": "tsx scripts/bench.mts"
+    "bench": "tsx scripts/bench.mts",
+    "voice:download": "tsx --use-system-ca scripts/voice-download.mts"
   },
   "dependencies": {
     "@tesseract.js-data/eng": "^1.0.0",
@@ -24,6 +25,7 @@
     "multer": "^2.0.2",
     "pdf-parse": "^1.1.1",
     "sharp": "^0.35.5",
+    "sherpa-onnx-node": "1.13.8",
     "tesseract.js": "^7.0.0",
     "xlsx": "^0.18.5",
     "yauzl": "^3.4.0"

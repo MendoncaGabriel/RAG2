@@ -9,6 +9,7 @@ import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, prepar
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
 import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
+import { voiceRouter } from "./voice.js";
 
 const app = express(), upload = multer({ dest: uploadDir, limits: { fileSize: Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024, files: 50 } });
 if (process.env.TRUST_PROXY === "true") app.set("trust proxy", 1);
@@ -162,6 +163,8 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     if(stream&&res.headersSent){send({type:"error",error:e instanceof Error?e.message:String(e)});res.end();}else fail(res,e);
   }
 });
+// Modo de voz (STT/TTS locais): só converte áudio <-> texto; a pergunta segue pelo endpoint de mensagens acima.
+app.use("/api/voice",voiceRouter());
 const aiError=(res:express.Response,e:unknown)=>res.status(400).json({error:e instanceof Error?e.message:String(e)});
 app.get("/api/ai/kinds",(_req,res)=>res.json(providerKinds));
 app.get("/api/ai/providers",(_req,res)=>res.json(listProviders()));

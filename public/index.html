@@ -172,7 +172,8 @@
             <div class="flex items-center gap-2 p-2">
               <button type="button" id="detailToggle" role="switch" aria-checked="false" title="Desligado: respostas rápidas e resumidas. Ligado: respostas mais demoradas, longas e detalhadas." class="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="detailTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="detailKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="detailLabel">Rápido</span></button>
               <span class="ml-auto hidden text-xs text-ink-muted lg:inline">Enter envia · Shift+Enter quebra linha</span>
-              <button id="send" type="submit" class="btn btn-primary ml-auto lg:ml-0"><i data-lucide="send" class="h-4 w-4"></i><span>Enviar</span></button>
+              <button id="voiceMode" type="button" class="btn btn-secondary ml-auto px-3 lg:ml-0" title="Conversar por voz (Ctrl+Shift+Espaço)" aria-label="Conversar por voz"><i data-lucide="audio-lines" class="h-4 w-4"></i><span class="hidden sm:inline">Voz</span></button>
+              <button id="send" type="submit" class="btn btn-primary"><i data-lucide="send" class="h-4 w-4"></i><span>Enviar</span></button>
             </div>
           </div>
         </form>
@@ -253,5 +254,6 @@
   <script>lucide.createIcons()</script>
   <script src="/app.js"></script>
   <script src="/settings.js"></script>
+  <script src="/voice.js"></script>
 </body>
 </html>
