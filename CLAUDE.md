@@ -4,7 +4,7 @@ Este arquivo orienta o Claude Code ao trabalhar neste repositório.
 
 ## Visão geral
 
-RAG Local: aplicação de RAG com notebooks independentes. Backend Express 5 + TypeScript (ESM), SQLite via `node:sqlite` (Node >= 22.13, sem dependências nativas para o banco) e frontend estático em `public/` (JS puro, sem build). A IA é exclusivamente o Ollama: servidores Ollama são cadastrados na tela de Configurações, não no ambiente. Não adicionar integrações com OpenAI, Gemini, Anthropic/Claude ou outros provedores.
+Bento (antes "RAG Local"): aplicação de RAG com notebooks independentes. Backend Express 5 + TypeScript (ESM), SQLite via `node:sqlite` (Node >= 22.13, sem dependências nativas para o banco) e frontend estático em `public/` (JS puro, sem build). A IA é exclusivamente o Ollama: servidores Ollama são cadastrados na tela de Configurações, não no ambiente. Não adicionar integrações com OpenAI, Gemini, Anthropic/Claude ou outros provedores.
 
 ## Comandos
 
@@ -32,7 +32,7 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 - [src/documents.ts](src/documents.ts): extração de texto (PDF, DOCX, PPTX, XLSX, imagens com OCR…), indexação e reindexação.
 - [src/database.ts](src/database.ts): schema SQLite (notebooks, documents, chunks, conversations, messages, saved_messages, provedores).
 - [src/auth.ts](src/auth.ts): login com usuário mestre + JWT em cookie, rate limit.
-- [public/](public/): `app.js` (UI principal, minificado em poucas linhas), `settings.js`, `login.html`, `embed.html`.
+- [public/](public/): `app.js` (UI principal, minificado em poucas linhas), `settings.js`, `login.html`, `embed.html`. Cores e fonte seguem o Jabil Brand Guidelines: paleta em variáveis CSS `--c-*` (claro/escuro) e no `tailwind.config` de `theme.js` (compartilhado por `index.html` e `login.html`; liberado sem login em `openPages`; o tema escolhido fica em `localStorage` `bento-theme`; use tokens como `bg-surface`, `text-heading`, `text-ok-ink`, não cores fixas) e componentes (`.btn`, `.panel`, `.msg`…) em `index.html`. Abaixo de 1280px o notebook usa abas (Conversa/Documentos/Histórico); a partir de 1280px as colunas Documentos e Conversas são recolhíveis (estado em `localStorage` `bento-cols`, animação por variáveis `--lw`/`--rw` em `#wsGrid`). O iframe (`embed.html`) tem um interruptor Rápido/Detalhado que envia `detailed` em `/api/present/:id/ask`.
 - [docker/start.mjs](docker/start.mjs): entrypoint do container.
 
 ## Convenções

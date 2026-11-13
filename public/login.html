@@ -2,41 +2,74 @@
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>Entrar · RAG</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#003865">
+  <title>Entrar · Bento</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto+Condensed:wght@400;700&family=Roboto:wght@300;400;500;700&display=swap">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="/theme.js"></script>
   <style>
-    :root{color-scheme:dark}
-    body{background:radial-gradient(ellipse at 50% -20%,#292932 0%,#17171b 48%,#101013 100%);color:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:-.015em}
-    input{background:rgba(12,12,15,.8);border:1px solid rgba(255,255,255,.14);color:#f5f5f7}
+    body{background:rgb(var(--c-canvas));color:rgb(var(--c-ink))}
+    :focus-visible{outline:2px solid rgb(var(--c-light));outline-offset:2px}
+    input:focus-visible{outline:none}
+    html.dark .ic-moon,html:not(.dark) .ic-sun{display:none}
   </style>
 </head>
-<body class="flex min-h-screen items-center justify-center px-4 antialiased">
-  <form id="form" method="post" action="/api/auth/login" onsubmit="return false" class="w-full max-w-sm rounded-2xl border border-white/10 bg-zinc-900/80 p-6 shadow-2xl sm:p-8">
-    <div class="mb-1 text-xs font-semibold uppercase tracking-widest text-indigo-400">RAG</div>
-    <h1 class="text-2xl font-bold">Entrar</h1>
-    <div class="mt-6 space-y-4">
-      <label class="block text-sm font-medium">Usuário<input id="username" name="username" autocomplete="username" required maxlength="200" autofocus class="mt-2 w-full rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-600"></label>
-      <label class="block text-sm font-medium">Senha<input id="password" name="password" type="password" autocomplete="current-password" required maxlength="500" class="mt-2 w-full rounded-lg px-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-600"></label>
-      <p id="error" class="hidden rounded-lg border border-red-900 bg-red-950/40 px-3 py-2 text-sm text-red-300"></p>
-      <button id="submit" class="w-full rounded-xl bg-indigo-600 px-4 py-2.5 font-medium text-white hover:bg-indigo-500 disabled:opacity-60">Entrar</button>
-    </div>
-  </form>
+<body class="min-h-screen font-sans antialiased">
+  <div class="grid min-h-screen lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+    <!-- Painel da marca: só em telas largas; no celular a marca aparece no topo do cartão. -->
+    <aside class="relative hidden overflow-hidden bg-header text-white lg:flex lg:flex-col lg:justify-between lg:p-12">
+      <div class="flex items-center gap-3">
+        <svg viewBox="0 0 64 64" class="h-10 w-10" aria-hidden="true"><rect width="64" height="64" rx="14" fill="#002B49"/><rect x="12" y="12" width="40" height="40" rx="6" fill="none" stroke="#fff" stroke-width="4"/><path d="M32 14v36M32 32h18" stroke="#fff" stroke-width="4"/><rect x="36" y="16" width="12" height="12" rx="2" fill="#15BEF0"/></svg>
+        <span class="font-condensed text-2xl font-bold uppercase tracking-[.16em]">Bento</span>
+      </div>
+      <div class="max-w-md">
+        <div class="mb-6 h-1 w-16 bg-jabil-sky"></div>
+        <h2 class="text-4xl font-light leading-tight">Converse com seus documentos.</h2>
+        <p class="mt-4 text-lg font-light text-white/80">Bases de conhecimento privadas, respostas com as fontes usadas.</p>
+      </div>
+      <p class="text-sm text-white/60">Notebooks independentes, cada um com seus próprios documentos.</p>
+    </aside>
+
+    <main class="relative flex items-center justify-center px-4 py-10 sm:px-8">
+      <button type="button" data-theme-toggle class="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-lg border border-line bg-surface text-ink-muted transition-colors hover:text-heading" title="Mudar para o tema escuro" aria-label="Mudar para o tema escuro"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ic-moon h-4 w-4"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="ic-sun h-4 w-4"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2m-7.07-14.93 1.41 1.41m11.32 11.32 1.41 1.41M2 12h2m16 0h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg></button>
+      <form id="form" method="post" action="/api/auth/login" onsubmit="return false" class="w-full max-w-sm rounded-xl border border-line border-t-4 border-t-jabil bg-surface p-6 shadow-sm sm:p-8">
+        <div class="mb-6 flex items-center gap-2.5 lg:hidden">
+          <svg viewBox="0 0 64 64" class="h-8 w-8" aria-hidden="true"><rect width="64" height="64" rx="14" style="fill:rgb(var(--c-jabil))"/><rect x="12" y="12" width="40" height="40" rx="6" fill="none" stroke="#fff" stroke-width="4"/><path d="M32 14v36M32 32h18" stroke="#fff" stroke-width="4"/><rect x="36" y="16" width="12" height="12" rx="2" fill="#15BEF0"/></svg>
+          <span class="font-condensed text-xl font-bold uppercase tracking-[.14em] text-heading">Bento</span>
+        </div>
+        <h1 class="text-2xl font-bold text-heading">Entrar</h1>
+        <p class="mt-1 text-sm text-ink-muted">Use o usuário e a senha do sistema.</p>
+        <div class="mt-6 space-y-4">
+          <label class="block text-sm font-medium">Usuário<input id="username" name="username" autocomplete="username" required maxlength="200" autofocus class="mt-1.5 w-full rounded-lg border border-line bg-surface px-3 py-2.5 text-base text-ink focus:border-jabil-light focus:outline-none focus:ring-2 focus:ring-jabil-light/25"></label>
+          <label class="block text-sm font-medium">Senha
+            <span class="relative mt-1.5 block"><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="500" class="w-full rounded-lg border border-line bg-surface py-2.5 pl-3 pr-16 text-base text-ink focus:border-jabil-light focus:outline-none focus:ring-2 focus:ring-jabil-light/25"><button type="button" id="togglePw" class="absolute inset-y-0 right-1 my-1 rounded-md px-2.5 text-xs font-medium text-jabil-medium hover:bg-canvas" aria-label="Mostrar senha">Ver</button></span>
+          </label>
+          <p id="error" role="alert" class="hidden rounded-lg border border-l-4 border-line border-l-danger bg-surface px-3 py-2 text-sm text-danger-ink"></p>
+          <button id="submit" class="w-full rounded-lg bg-jabil px-4 py-2.5 font-medium text-white transition-colors hover:bg-jabil-old disabled:cursor-wait disabled:opacity-60">Entrar</button>
+        </div>
+      </form>
+    </main>
+  </div>
   <script>
     const raw=new URLSearchParams(location.search).get('next')||'/';
     const next=raw.startsWith('/')&&!raw.startsWith('//')&&!raw.includes('\\')?raw:'/';
     fetch('/api/auth/me').then(r=>{if(r.ok)location.replace(next)}).catch(()=>{});
+    const pw=document.getElementById('password'),toggle=document.getElementById('togglePw');
+    toggle.onclick=()=>{const show=pw.type==='password';pw.type=show?'text':'password';toggle.textContent=show?'Ocultar':'Ver';toggle.setAttribute('aria-label',show?'Ocultar senha':'Mostrar senha');pw.focus()};
     document.getElementById('form').onsubmit=async e=>{
       e.preventDefault();
       const btn=document.getElementById('submit'),err=document.getElementById('error');
-      btn.disabled=true;err.classList.add('hidden');
+      btn.disabled=true;btn.textContent='Entrando…';err.classList.add('hidden');
       try{
-        const r=await fetch('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value,password:document.getElementById('password').value})});
+        const r=await fetch('/api/auth/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value,password:pw.value})});
         const d=await r.json().catch(()=>({}));
         if(!r.ok)throw Error(d.error||`Erro ${r.status}`);
         location.replace(next);
-      }catch(x){err.textContent=x.message;err.classList.remove('hidden');btn.disabled=false;document.getElementById('password').select()}
+      }catch(x){err.textContent=x.message;err.classList.remove('hidden');btn.disabled=false;btn.textContent='Entrar';pw.select()}
     };
   </script>
 </body>

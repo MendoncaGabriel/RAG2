@@ -1,6 +1,6 @@
-# RAG Local
+# Bento
 
-Aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e IA exclusivamente com Ollama (chat e embeddings locais). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
+Bento é uma aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e IA exclusivamente com Ollama (chat e embeddings locais). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
 
 ## Requisitos
 

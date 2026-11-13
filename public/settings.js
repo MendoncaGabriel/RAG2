@@ -3,8 +3,8 @@ const PRESETS = [
   { label: 'Ollama (local)', name: 'Ollama', kind: 'ollama', baseUrl: 'http://localhost:11434', chatModel: 'qwen2.5:3b', embeddingModel: 'bge-m3' },
 ];
 const SLOTS = {
-  chat: { field: 'chatModel', list: '#listChat', select: '#activeChat', saved: '#savedChat', noun: 'IA de chat', badge: 'bg-indigo-600/30 text-indigo-200' },
-  embedding: { field: 'embeddingModel', list: '#listEmbedding', select: '#activeEmbedding', saved: '#savedEmbedding', noun: 'embeddings', badge: 'bg-emerald-600/25 text-emerald-200' },
+  chat: { field: 'chatModel', list: '#listChat', select: '#activeChat', saved: '#savedChat', noun: 'IA de chat', badge: 'bg-jabil text-white' },
+  embedding: { field: 'embeddingModel', list: '#listEmbedding', select: '#activeEmbedding', saved: '#savedEmbedding', noun: 'embeddings', badge: 'bg-ok text-white' },
 };
 let kinds = {}, state = { providers: [], active: { chat: null, embedding: null } }, editingId = null, editingSlot = 'chat', wasWorkspace = false;
 const testResults = {};
@@ -15,9 +15,11 @@ async function refreshAiStatus() {
   const el = $('#aiStatus'), text = $('#aiStatusText');
   try {
     const s = await api('/api/ai/status');
-    if (s.chat && s.embedding) { text.textContent = `IA: ${s.chat.model}`; el.className = 'flex items-center gap-2 text-xs text-emerald-400 sm:text-sm'; el.title = `Chat: ${s.chat.name} (${s.chat.model})\nEmbeddings: ${s.embedding.name} (${s.embedding.model})`; }
-    else { text.textContent = s.chat || s.embedding ? `Falta escolher ${s.chat ? 'embeddings' : 'chat'}` : 'Configurar IA'; el.className = 'flex items-center gap-2 text-xs text-amber-300 sm:text-sm'; el.title = 'Abrir configurações de IA'; }
-  } catch (e) { text.textContent = 'IA indisponível'; el.className = 'flex items-center gap-2 text-xs text-red-400 sm:text-sm'; el.title = e.message; }
+    if (s.chat && s.embedding) { text.textContent = `IA: ${s.chat.model}`; el.dataset.state = 'ok'; el.title = `Chat: ${s.chat.name} (${s.chat.model})\nEmbeddings: ${s.embedding.name} (${s.embedding.model})`; }
+    else { text.textContent = s.chat || s.embedding ? `Falta escolher ${s.chat ? 'embeddings' : 'chat'}` : 'Configurar IA'; el.dataset.state = 'warn'; el.title = 'Abrir configurações de IA'; }
+  } catch (e) { text.textContent = 'IA indisponível'; el.dataset.state = 'error'; el.title = e.message; }
+  // No celular o texto fica oculto: o rótulo acessível carrega o estado (a cor do ponto indica ok/atenção/erro).
+  el.setAttribute('aria-label', `Configurações de IA: ${text.textContent}`);
 }
 
 function renderActive() {
@@ -33,19 +35,19 @@ function renderProviders() {
     const host = $(c.list), items = state.providers.filter(p => p[c.field]);
     if (!items.length) {
       const presets = PRESETS.map((p, i) => [p, i]).filter(([p]) => p[c.field]);
-      host.innerHTML = `<div class="rounded-xl border border-dashed border-slate-700 p-5 text-center"><p class="font-medium">Nenhuma ${slot === 'chat' ? 'IA de chat' : 'IA de embeddings'} cadastrada</p><p class="mt-1 text-sm text-slate-400">Escolha uma para começar:</p><div class="mt-4 flex flex-wrap justify-center gap-2">${presets.map(([p, i]) => `<button data-quick="${i}" data-slot="${slot}" class="rounded-full border border-slate-700 px-3 py-1.5 text-sm hover:bg-slate-800">${esc(p.label)}</button>`).join('')}</div></div>`;
+      host.innerHTML = `<div class="rounded-xl border-2 border-dashed border-line bg-canvas p-5 text-center"><p class="font-medium text-heading">Nenhuma ${slot === 'chat' ? 'IA de chat' : 'IA de embeddings'} cadastrada</p><p class="mt-1 text-sm text-ink-muted">Escolha uma para começar:</p><div class="mt-4 flex flex-wrap justify-center gap-2">${presets.map(([p, i]) => `<button data-quick="${i}" data-slot="${slot}" class="btn btn-secondary rounded-full">${esc(p.label)}</button>`).join('')}</div></div>`;
       continue;
     }
     host.innerHTML = items.map(p => {
       const inUse = state.active[slot] === p.id, t = testResults[p.id], r = t && t !== 'loading' ? t[slot] : null;
-      return `<article class="rounded-xl border ${inUse ? 'border-indigo-500/60' : 'border-slate-800'} bg-slate-950/50 p-4">
+      return `<article class="rounded-xl border ${inUse ? 'border-jabil-light ring-1 ring-jabil-light' : 'border-line'} bg-surface p-4">
       <div class="flex flex-wrap items-start justify-between gap-3">
-        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><h4 class="break-words font-semibold">${esc(p.name)}</h4><span class="rounded-full border border-slate-700 px-2 py-0.5 text-xs text-slate-400">${esc(p.kindLabel)}</span>${inUse ? `<span class="rounded-full ${c.badge} px-2 py-0.5 text-xs">Em uso</span>` : ''}</div>
+        <div class="min-w-0"><div class="flex flex-wrap items-center gap-2"><h4 class="break-words font-semibold text-heading">${esc(p.name)}</h4><span class="badge">${esc(p.kindLabel)}</span>${inUse ? `<span class="rounded-full ${c.badge} px-2 py-0.5 text-xs">Em uso</span>` : ''}</div>
         <p class="mt-1 break-all text-sm">Modelo: <span class="font-medium">${esc(p[c.field])}</span></p>
-        <p class="mt-1 break-all font-mono text-xs text-slate-400">${esc(p.baseUrl)} · ${p.hasKey ? 'chave ' + esc(p.keyHint) : 'sem chave'}</p></div>
-        <div class="flex shrink-0 flex-wrap gap-1">${inUse ? '' : `<button data-use="${p.id}" data-slot="${slot}" class="rounded-lg px-3 py-1.5 text-sm text-indigo-300 hover:bg-slate-800">Usar</button>`}<button data-test="${p.id}" class="rounded-lg px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800">Testar</button><button data-edit="${p.id}" data-slot="${slot}" class="rounded-lg px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800">Editar</button><button data-delete="${p.id}" class="rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-slate-800">Excluir</button></div>
+        <p class="mt-1 break-all font-mono text-xs text-ink-muted">${esc(p.baseUrl)} · ${p.hasKey ? 'chave ' + esc(p.keyHint) : 'sem chave'}</p></div>
+        <div class="flex shrink-0 flex-wrap gap-1">${inUse ? '' : `<button data-use="${p.id}" data-slot="${slot}" class="btn btn-primary btn-sm">Usar</button>`}<button data-test="${p.id}" class="btn btn-ghost btn-sm">Testar</button><button data-edit="${p.id}" data-slot="${slot}" class="btn btn-ghost btn-sm">Editar</button><button data-delete="${p.id}" class="btn btn-ghost btn-sm hover:text-danger-ink">Excluir</button></div>
       </div>
-      ${t === 'loading' ? '<p class="mt-3 text-xs text-slate-400">Testando…</p>' : r ? `<p class="mt-3 break-words text-xs ${r.ok ? 'text-emerald-400' : 'text-red-400'}">${r.ok ? '✓' : '✗'} ${esc(r.detail)}</p>` : ''}
+      ${t === 'loading' ? '<p class="mt-3 text-xs text-ink-muted">Testando…</p>' : r ? `<p class="mt-3 break-words text-xs ${r.ok ? 'text-ok-ink' : 'text-danger-ink'}">${r.ok ? '✓' : '✗'} ${esc(r.detail)}</p>` : ''}
     </article>`;
     }).join('');
   }
@@ -113,12 +115,12 @@ $('#pfKeyToggle').onclick = () => { const show = form.key.type === 'password'; f
 
 $('#pfFetch').onclick = async () => {
   const msg = $('#pfFetchMsg'), btn = $('#pfFetch');
-  btn.disabled = true; msg.textContent = 'Buscando modelos…'; msg.className = 'mt-2 text-xs text-slate-400';
+  btn.disabled = true; msg.textContent = 'Buscando modelos…'; msg.className = 'mt-2 text-xs text-ink-muted';
   try {
     const { models } = await api('/api/ai/models', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ providerId: editingId, kind: 'ollama', baseUrl: form.baseUrl.value.trim(), apiKey: form.key.value.trim() }) });
     $('#pfModels').innerHTML = models.map(m => `<option value="${esc(m)}"></option>`).join('');
     msg.textContent = models.length ? `${models.length} modelo(s) encontrados. Clique no campo do modelo e escolha na lista.` : 'Nenhum modelo retornado; digite o nome manualmente.';
-  } catch (e) { msg.textContent = `Não foi possível listar: ${e.message}`; msg.className = 'mt-2 text-xs text-amber-300'; }
+  } catch (e) { msg.textContent = `Não foi possível listar: ${e.message}`; msg.className = 'mt-2 text-xs font-medium text-danger-ink'; }
   finally { btn.disabled = false; }
 };
 

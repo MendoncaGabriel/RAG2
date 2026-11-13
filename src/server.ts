@@ -41,7 +41,7 @@ app.post("/api/present/:id/ask", rateLimit("present-ask", Number(process.env.PRE
   res.flushHeaders();
   const send = (event: unknown) => res.write(JSON.stringify(event) + "\n");
   try {
-    const result = await ask(nbId, question, { history, onToken: token => send({ type: "token", token }) });
+    const result = await ask(nbId, question, { history, detailed: req.body?.detailed === true, onToken: token => send({ type: "token", token }) });
     send({ type: "done", assistant: { content: result.answer } });
   } catch (e) { send({ type: "error", error: e instanceof Error ? e.message : String(e) }); }
   res.end();
@@ -51,7 +51,7 @@ app.use("/api", (req, res, next) => {
   if (currentUser(req)) return next();
   res.status(401).json({ error: "Sessão expirada. Faça login novamente." });
 });
-const openPages = new Set(["/login.html", "/embed.html", "/favicon.svg"]);
+const openPages = new Set(["/login.html", "/embed.html", "/favicon.svg", "/theme.js"]);
 app.use((req, res, next) => {
   if (openPages.has(req.path) || currentUser(req)) return next();
   return req.path === "/" || req.path.endsWith(".html") ? res.redirect("/login.html") : res.sendStatus(401);
@@ -184,4 +184,4 @@ app.get("/api/system/info",async(_req,res)=>{
 });
 app.use((err:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{ if(err instanceof multer.MulterError)return res.status(400).json({error:err.message}); fail(res,err); });
 const port=Number(process.env.PORT)||3000;
-app.listen(port,()=>{console.log(`RAG Local disponível em http://localhost:${port}`);void prepareModel()});
+app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`);void prepareModel()});
