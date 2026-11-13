@@ -332,6 +332,13 @@ export const prepareModel = () => refreshModelInfo(activeProvider("chat"));
 // O Ollama recarrega o modelo quando num_ctx muda entre chamadas; todas as chamadas de chat usam o mesmo valor para evitar esse custo.
 export const generationProfile = () => modelProfile(activeProvider("chat"));
 export const chatContext = () => modelProfile(activeProvider("chat")).contextTokens;
+// Modelos ativos e num_ctx do perfil, para o ajuste automático ao PC (tuning.ts) medir e pré-carregar com as opções reais.
+export async function tuneTarget() {
+  const chatP = activeProvider("chat"), embP = activeProvider("embedding");
+  if (!chatP) return null;
+  await prepareModel();
+  return { baseUrl: chatP.baseUrl, apiKey: chatP.apiKey, chatModel: chatP.chatModel, contextTokens: chatContext(), embedding: embP ? { baseUrl: embP.baseUrl, apiKey: embP.apiKey, model: embP.embeddingModel } : undefined };
+}
 
 // Cache de embeddings de consulta: perguntas repetidas (apresentações, testes, "tentar de novo") não recalculam o vetor.
 const queryVectorCache = new Map<string, number[][]>();

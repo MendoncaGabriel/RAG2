@@ -67,7 +67,9 @@ services:
       NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
       DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
       CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
-      OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-6}
+      # Vazio = medido automaticamente na inicialização (data/tuning.json).
+      OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-}
+      AUTOTUNE: ${AUTOTUNE:-true}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
       # Modo de voz: modelos baixados no 1º uso para ./data/voice.
       VOICE_ENABLED: ${VOICE_ENABLED:-true}

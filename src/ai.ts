@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { db } from "./database.js";
 import { deriveProfile, embeddingPrefix, isReasoningOnly, sizeFromDetails, type ModelInfo } from "./modelprofile.js";
+import { tunedThreads } from "./tuning.js";
 
 // Camada única de IA: servidores Ollama cadastrados pelo usuário (tela de Configurações) e dois "slots" ativos,
 // um para chat e outro para embeddings. Nada aqui depende de variáveis de ambiente.
@@ -147,6 +148,10 @@ export async function refreshModelInfo(p: Provider | null): Promise<ModelInfo | 
   return info ?? undefined;
 }
 
+// Threads do Ollama: medidas para este PC na inicialização (tuning.ts) ou OLLAMA_NUM_THREAD; sem valor, o Ollama decide.
+// O mesmo valor em todas as chamadas: trocar num_thread entre chamadas faz o Ollama recarregar o modelo.
+const threadOption = (p: Provider) => { const n = tunedThreads(p.baseUrl); return n ? { num_thread: n } : {}; };
+
 // ---------- Chat ----------
 export type Msg = { role: "system" | "user" | "assistant"; content: string };
 export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; topK?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal }
@@ -160,7 +165,7 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
   const label = providerKinds[p.kind].label;
   const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, signal: opts.signal, json: {
     model: p.chatModel, stream: true, ...(reasoningOnly ? {} : { think: false }), keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
-    options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, ...(opts.topK ? { top_k: opts.topK } : {}), repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } : {}) },
+    options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, ...(opts.topK ? { top_k: opts.topK } : {}), repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...threadOption(p) },
     messages: opts.messages,
   } });
   if (!res.ok || !res.body) throw await httpError(label, res, p.chatModel);
@@ -176,7 +181,7 @@ export async function chat(opts: ChatOptions, onToken?: (token: string) => void)
 // ---------- Embeddings ----------
 export async function embedWith(p: Provider, inputs: string[], kind: "query" | "document" = "document"): Promise<number[][]> {
   const label = providerKinds[p.kind].label, model = p.embeddingModel;
-  const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embeddingPrefix(model, kind) + t), keep_alive: "30m", ...(Number(process.env.OLLAMA_NUM_THREAD) > 0 ? { options: { num_thread: Number(process.env.OLLAMA_NUM_THREAD) } } : {}) } }), model);
+  const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embeddingPrefix(model, kind) + t), keep_alive: "30m", ...(tunedThreads(p.baseUrl) ? { options: threadOption(p) } : {}) } }), model);
   const vectors: number[][] = data.embeddings;
   if (!Array.isArray(vectors) || vectors.length !== inputs.length || vectors.some(v => !Array.isArray(v))) throw new Error(`${p.name} retornou embeddings incompletos para ${model}. Verifique se o modelo existe.`);
   return vectors;
@@ -198,7 +203,8 @@ export async function listModels(input: { kind: ProviderKind; baseUrl?: string; 
 export async function testProvider(p: Provider) {
   const run = async (fn: () => Promise<string>) => { const t = Date.now(); try { return { ok: true, detail: `${await fn()} · ${Date.now() - t} ms` }; } catch (e) { return { ok: false, detail: e instanceof Error ? e.message : String(e) }; } };
   return {
-    chat: p.chatModel ? await run(async () => { await chatWith(p, { messages: [{ role: "user", content: "Responda apenas OK." }], maxTokens: 16, contextSize: 512 }); const info = await refreshModelInfo(p), prof = deriveProfile(p.chatModel, info); return `Chat (${p.chatModel}) respondeu · perfil ${prof.tier} (${prof.family}, ${Number(prof.sizeB.toFixed(1))}B por ${prof.sizeSource}, contexto ${prof.contextTokens})`; }) : null,
+    // num_ctx igual ao das perguntas: com outro valor o Ollama recarregaria o modelo na pergunta seguinte.
+    chat: p.chatModel ? await run(async () => { const info = await refreshModelInfo(p), prof = deriveProfile(p.chatModel, info); await chatWith(p, { messages: [{ role: "user", content: "Responda apenas OK." }], maxTokens: 16, contextSize: prof.contextTokens }); return `Chat (${p.chatModel}) respondeu · perfil ${prof.tier} (${prof.family}, ${Number(prof.sizeB.toFixed(1))}B por ${prof.sizeSource}, contexto ${prof.contextTokens})`; }) : null,
     embedding: p.embeddingModel ? await run(async () => { const [v] = await embedWith(p, ["teste"]); return `Embeddings (${p.embeddingModel}) responderam com ${v.length} dimensões`; }) : null,
   };
 }

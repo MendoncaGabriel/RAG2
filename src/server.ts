@@ -5,7 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, prepareModel, uuid } from "./rag.js";
+import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, tuneTarget, uuid } from "./rag.js";
+import { autoTune } from "./tuning.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
 import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
@@ -171,7 +172,7 @@ app.get("/api/ai/providers",(_req,res)=>res.json(listProviders()));
 app.post("/api/ai/providers",(req,res)=>{try{res.status(201).json(createProvider(req.body))}catch(e){aiError(res,e)}});
 app.put("/api/ai/providers/:id",(req,res)=>{try{const p=updateProvider(req.params.id,req.body);p?res.json(p):res.sendStatus(404)}catch(e){aiError(res,e)}});
 app.delete("/api/ai/providers/:id",(req,res)=>deleteProvider(req.params.id)?res.json({ok:true}):res.sendStatus(404));
-app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void prepareModel();res.json(listProviders().active)}catch(e){aiError(res,e)}});
+app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json(listProviders().active)}catch(e){aiError(res,e)}});
 app.get("/api/ai/status",(_req,res)=>res.json(activeSummary()));
 app.post("/api/ai/providers/:id/test",async(req,res)=>{const p=getProvider(req.params.id);if(!p)return res.sendStatus(404);res.json(await testProvider(p))});
 // Lista modelos do provedor; sem chave informada, usa a do provedor já cadastrado (providerId).
@@ -184,4 +185,5 @@ app.get("/api/system/info",async(_req,res)=>{
 });
 app.use((err:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{ if(err instanceof multer.MulterError)return res.status(400).json({error:err.message}); fail(res,err); });
 const port=Number(process.env.PORT)||3000;
-app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`);void prepareModel()});
+// Antes de aceitar conexões: mede o PC e pré-carrega os modelos (tuning.ts). A medição só acontece na 1ª vez por PC/modelo.
+void tuneTarget().then(t=>autoTune(t)).catch(e=>console.warn("[Ajuste] falhou:",e)).finally(()=>app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`)}));

@@ -14,6 +14,7 @@ npm run dev        # tsx watch em src/server.ts (http://localhost:3000)
 npm run typecheck  # tsc --noEmit
 npm test           # testes determinísticos (sem LLM): chunking, registros, filtros, cálculos
 npm run bench -- --label nova --out bench.json   # benchmark ponta a ponta com Ollama (qwen2.5:3b + bge-m3; use `BENCH_CHAT_MODEL` para outro modelo)
+npm run tune       # mede de novo as threads do Ollama neste PC para o modelo ativo (o servidor faz sozinho na 1ª inicialização)
 npm run voice:download   # baixa antes os modelos do modo de voz (padrão: Parakeet + vozes faber e alan)
 npm run build      # tsc -> dist/
 npm start          # node dist/server.js
@@ -29,7 +30,8 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 - [src/structured.ts](src/structured.ts): registros de tabelas/fichas (`records`), interpretação da pergunta (`analyzeQuery`) e respostas determinísticas (filtros, contagem, soma, média, ordenação, listagem completa) e registros exatos por código.
 - [src/rag.ts](src/rag.ts): busca híbrida (semântica + BM25-like com RRF), construção do prompt por perfil e `ask`.
 - [src/modelprofile.ts](src/modelprofile.ts): reconhecimento do modelo (tamanho, família, contexto, raciocínio) e perfil de geração e recuperação derivado dele; prefixos de embeddings.
-- [src/ai.ts](src/ai.ts): cliente do Ollama (chat em streaming, embeddings, listagem de modelos, testes). Opções do Ollama (`num_ctx`, `num_predict`, `num_thread`) ficam aqui.
+- [src/ai.ts](src/ai.ts): cliente do Ollama (chat em streaming, embeddings, listagem de modelos, testes). Opções do Ollama (`num_ctx`, `num_predict`, `num_thread`) ficam aqui; `num_thread` vem de `tunedThreads` (tuning.ts).
+- [src/tuning.ts](src/tuning.ts): ajuste automático ao PC, antes do `app.listen` (server.ts): detecta CPU/RAM/GPU, mede no Ollama as threads mais rápidas para o modelo ativo (pula se o modelo está todo na GPU), guarda em `data/tuning.json` (chave: hardware + servidor + versão do Ollama + modelo), pré-carrega embeddings e chat com o mesmo `num_ctx`/`num_thread` das perguntas e avisa no log sobre GPU ociosa ou `OLLAMA_MAX_LOADED_MODELS=1`. `OLLAMA_NUM_THREAD` sobrescreve; `AUTOTUNE=false` desliga. Não mexe em `num_ctx` (medido: não muda a velocidade, só a memória). Testes em `tests/tuning.test.mts`.
 - [src/documents.ts](src/documents.ts): extração de texto (PDF, DOCX, PPTX, XLSX, imagens com OCR…), indexação e reindexação.
 - [src/voice.ts](src/voice.ts): modo de voz local com `sherpa-onnx-node` (versão fixa 1.13.8: a 2.x removeu o espeak-ng usado pelas vozes Piper). STT Parakeet/Whisper, TTS Piper, correção de códigos do notebook na transcrição (`fixCodes`, usa `extractCodes` do RAG só para leitura), download sob demanda do Hugging Face para `VOICE_DIR` (marcadores `.ok-*`), filas por modelo, limpeza (`speechText`) e normalização pt-BR (`normalizePt`) do texto falado; rotas em `/api/voice`. Não toca no RAG: a pergunta transcrita vai pela rota de mensagens. [public/voice.js](public/voice.js): overlay em tela cheia (HUD em canvas), VAD por energia no navegador, frases enviadas à síntese conforme o streaming chega, efeitos via Web Audio. Testes em `tests/voice.test.mts`.
 - [src/database.ts](src/database.ts): schema SQLite (notebooks, documents, chunks, conversations, messages, saved_messages, provedores).

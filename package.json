@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.mts",
     "bench": "tsx scripts/bench.mts",
+    "tune": "tsx --use-system-ca scripts/tune.mts",
     "voice:download": "tsx --use-system-ca scripts/voice-download.mts"
   },
   "dependencies": {

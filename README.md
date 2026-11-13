@@ -20,7 +20,7 @@ Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`) e ajuste
 npm run dev
 ```
 
-Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) para cadastrar a IA — veja a seção abaixo. Para verificar a compilação TypeScript: `npm run typecheck`. Para gerar a versão de produção e executá-la localmente: `npm run build` e `npm start`.
+Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) para cadastrar a IA — veja a seção abaixo. Para verificar a compilação TypeScript: `npm run typecheck`. Para gerar a versão de produção e executá-la localmente: `npm run build` e `npm start`. Ao iniciar (`npm start` ou `npm run dev`), o app primeiro analisa o PC e ajusta o Ollama a ele — veja [Ajuste automático ao computador](#ajuste-automático-ao-computador).
 
 ### Docker Compose
 
@@ -95,6 +95,28 @@ Em **IA em uso** escolha qual cadastro responde o chat e qual gera os embeddings
 
 O RAG não é otimizado para um modelo só: ele reconhece o modelo de chat ativo (tamanho, família, contexto nativo e se só raciocina, consultando o Ollama e, na falta, o nome) e ajusta sozinho a amostragem, o limite de tokens, o `num_ctx`, o top-K, o tamanho do contexto e o uso de histórico. Exemplos: `qwen3:4b-instruct-2507-q4_K_M` → perfil médio, família Qwen3 (`top_k` 20, sem decodificação gulosa); `llama3.1:8b` → grande; `gemma3:270m` → mini. Troque o modelo em Configurações e use **Testar** para ver o perfil detectado. Variáveis como `RETRIEVAL_TOP_K` ou `MAX_CONTEXT_CHARS` sobrescrevem o perfil quando definidas.
 
+## Ajuste automático ao computador
+
+Antes de aceitar conexões, o servidor analisa o PC e se ajusta a ele ([src/tuning.ts](src/tuning.ts)); funciona em qualquer notebook ou desktop, sem configuração:
+
+1. Detecta CPU (núcleos físicos e lógicos), RAM e GPU.
+2. Mede, com o modelo de chat ativo, a velocidade do Ollama com algumas quantidades de threads (metade, 75%, núcleos − 1 e todos os núcleos físicos, refinando em volta da melhor) e escolhe a de menor tempo estimado de resposta (leitura do prompt + geração). Empates ficam com menos threads, deixando CPU para o app. Se o modelo roda inteiro na GPU, as threads não importam e a medição é pulada.
+3. Guarda o resultado em `data/tuning.json` (por CPU, RAM, servidor, versão do Ollama e modelo): só a 1ª inicialização de cada PC/modelo mede (20 s a 2 min); as seguintes usam o valor salvo. `npm run tune` mede de novo; trocar o modelo em Configurações mede/aplica em segundo plano.
+4. Pré-carrega embeddings e chat com as mesmas opções das perguntas (`num_ctx` e `num_thread` iguais, então o Ollama não recarrega): a 1ª pergunta já não paga a carga do modelo.
+5. Avisa no log quando a GPU está ociosa (Ollama só na CPU) ou quando chat e embeddings se expulsam da memória a cada pergunta.
+
+`OLLAMA_NUM_THREAD` fixa as threads manualmente; `AUTOTUNE=false` desliga a medição. O `num_ctx` não é ajustado pela medição: nos testes ele não mudou a velocidade (só reserva memória, ~270 MB de 3072 para 8192 no qwen2.5:3b), então continua vindo do perfil do modelo, dimensionado para nunca truncar prompt + histórico + resposta (3072 até 2,5B; 6144 no 3–4B).
+
+Medições no Ryzen 7 7735U (8 núcleos, 32 GB), prompt típico do RAG (~1200–1500 tokens):
+
+| Configuração | qwen2.5:1.5b: 1º token · geração | qwen2.5:3b: 1º token · geração |
+|---|---|---|
+| CPU, 4 threads | 7,3 s · 23,6 tok/s | 21,9 s · 12,4 tok/s |
+| CPU, 7 threads (escolhido na CPU) | 4,9 s · 26,5 tok/s | ~14 s · 13,2 tok/s |
+| GPU integrada Radeon 680M (Vulkan) | **2,2 s · 39,8 tok/s** | **4,7 s · 22,6 tok/s** |
+
+`num_batch` (256–1024) não fez diferença e fica no padrão.
+
 ## Otimizações gerais
 
 - **Streaming**: a resposta aparece token a token (`POST /api/conversations/:id/messages?stream=1`, NDJSON); sem `stream=1` o comportamento antigo é mantido.
@@ -115,4 +137,7 @@ O RAG não é otimizado para um modelo só: ele reconhece o modelo de chat ativo
 
 ### Dica de desempenho do Ollama
 
-Por padrão o Ollama pode manter só um modelo na memória, trocando entre embedding e chat a cada pergunta (2 a 7 s perdidos). Inicie o Ollama com `OLLAMA_MAX_LOADED_MODELS=2` (no Windows, defina a variável de ambiente e reinicie o Ollama) para manter os dois carregados.
+Configurações do próprio Ollama (variáveis de ambiente do servidor Ollama; no Windows, defina-as no usuário e reinicie o Ollama) que o app não consegue mudar sozinho, mas avisa no log quando faltam:
+
+- `OLLAMA_MAX_LOADED_MODELS=2` (ou mais): com 1, o Ollama troca entre embeddings e chat a cada pergunta (medido: +3,6 s por pergunta com o qwen2.5:1.5b; 2 a 7 s conforme o modelo).
+- GPU integrada AMD/Intel: `OLLAMA_VULKAN=1` liga a aceleração Vulkan (Radeon 680M: 1º token 2–3× mais rápido, geração 1,5–1,7× mais rápida). Não defina `OLLAMA_LLAMACPP_DISABLE_GPU=1`. NVIDIA usa CUDA com o driver atualizado; Mac Apple Silicon usa Metal automaticamente.
