@@ -6,6 +6,8 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
+import { db } from "./database.js";
+import { extractCodes } from "./structured.js";
 
 export const voiceDir = path.resolve(process.env.VOICE_DIR || "./data/voice");
 const enabled = process.env.VOICE_ENABLED !== "false";
@@ -27,6 +29,8 @@ const STT: Record<string, SttModel> = {
     config: d => ({ transducer: { encoder: `${d}/encoder.int8.onnx`, decoder: `${d}/decoder.int8.onnx`, joiner: `${d}/joiner.int8.onnx` }, modelType: "nemo_transducer", tokens: `${d}/tokens.txt` }) },
   "whisper-base": whisper("base", "Whisper base", 160),
   "whisper-small": whisper("small", "Whisper small", 375),
+  // Precisão máxima: ~16% menos erros que o Parakeet em português, mas ~3 s por pergunta em CPU e ~2 GB de RAM.
+  "whisper-turbo": whisper("turbo", "Whisper large-v3 turbo", 1040),
 };
 const piper = (key: string, name: string, label: string, lang: "pt" | "en"): Voice => ({ key, label, lang, onnx: `${name}.onnx`, mb: 63, repo: `csukuangfj/vits-piper-${name}`, dir: `voices/${key}`, filter: new RegExp(`^(${name.replace(/[.]/g, "\\.")}\\.onnx|tokens\\.txt)$`) });
 export const VOICES: Record<string, Voice> = {
@@ -123,10 +127,53 @@ export function prepare(voices: string[]) {
 
 export async function transcribe(pcm: Int16Array) {
   if (pcm.length < 16000 * 0.25) return "";
+  // Sem margem extra de silêncio: o navegador já envia até 0,6 s antes da fala, e margens maiores pioraram frases curtas nos testes.
   const samples = new Float32Array(pcm.length);
   for (let i = 0; i < pcm.length; i++) samples[i] = pcm[i] / 32768;
   const rec = await getRecognizer();
-  return sttQueue(async () => { const s = rec.createStream(); s.acceptWaveform({ samples, sampleRate: 16000 }); await rec.decodeAsync(s); return String(rec.getResult(s).text || "").trim(); });
+  const text = await sttQueue(async () => { const s = rec.createStream(); s.acceptWaveform({ samples, sampleRate: 16000 }); await rec.decodeAsync(s); return String(rec.getResult(s).text || "").trim(); });
+  return text.replace(/^[A-Z]{2,}\d[A-Z0-9]*\s+(?=\S)/, ""); // token espúrio ocasional do Parakeet no início ("RKA4JL Qual é…")
+}
+
+// ---------- Códigos do notebook na fala ----------
+// Falados, "APP-MES" vira "app mês" e "FOR-002" vira "for002"; o RAG prioriza códigos exatos, então a transcrição é
+// reescrita com os códigos (maiúsculos, como o RAG extrai) que existem no notebook. Só leitura dos trechos indexados.
+const plain = (s: string) => s.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
+const lev1 = (a: string, b: string) => { // distância de edição <= 1?
+  if (a === b) return true; if (Math.abs(a.length - b.length) > 1) return false;
+  let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++;
+  return a.slice(i + 1) === b.slice(i + 1) || a.slice(i) === b.slice(i + 1) || a.slice(i + 1) === b.slice(i);
+};
+export function fixCodes(text: string, codes: string[]) {
+  const vocab = codes.map(c => ({ code: c, key: plain(c), head: plain(c.split("-")[0]), parts: c.split("-").length })).filter(v => v.key.length >= 3);
+  if (!vocab.length) return text;
+  const words = text.split(/\s+/).filter(Boolean), out: string[] = [];
+  for (let i = 0; i < words.length;) {
+    let hit: { code: string; n: number } | null = null;
+    // Trechos de até 4 palavras sem pontuação no meio; primeiro o casamento exato, depois o aproximado:
+    // 1 letra de diferença só quando o prefixo (antes do hífen) foi ouvido certo ("SRV Mau" -> SRV-MAO).
+    let max = 1; while (max < 4 && i + max < words.length && !/[.,;:!?…]$/.test(words[i + max - 1])) max++;
+    for (const exact of [true, false]) for (let n = max; n >= 1 && !hit; n--) {
+      const span = words.slice(i, i + n).join(""), key = plain(span), head = plain(words[i]);
+      if (!key || span.includes("-")) continue; // já escrito com hífen ("bem-sucedido", "APP-MES"): mantém como foi transcrito
+      // Aproximado em uma palavra só ("Apmes" -> APP-MES) exige as 2 primeiras letras e não pode ser palavra comum (minúscula).
+      const v = exact ? vocab.find(v => v.key === key) : vocab.find(v => v.key.length >= 5 && lev1(key, v.key) && (n >= 2 ? head === v.head : key.slice(0, 2) === v.key.slice(0, 2) && /^[A-Z]/.test(words[i])));
+      if (v && n <= v.parts + 2) hit = { code: v.code, n };
+    }
+    if (hit) { out.push(hit.code + (words[i + hit.n - 1].match(/[.,;:!?…]+$/)?.[0] || "")); i += hit.n; } else out.push(words[i++]);
+  }
+  return out.join(" ");
+}
+const codeCache = new Map<string, { count: number; codes: string[] }>();
+function notebookCodes(notebookId: string) {
+  const count = (db.prepare("SELECT count(*) AS n FROM chunks WHERE notebook_id=?").get(notebookId) as { n: number }).n;
+  const hit = codeCache.get(notebookId);
+  if (hit && hit.count === count) return hit.codes;
+  const codes = new Set<string>();
+  for (const r of db.prepare("SELECT content FROM chunks WHERE notebook_id=?").iterate(notebookId) as Iterable<{ content: string }>)
+    for (const c of extractCodes(r.content)) if (/^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$/.test(c)) codes.add(c);
+  const list = [...codes]; codeCache.set(notebookId, { count, codes: list });
+  return list;
 }
 
 // ---------- Texto para fala ----------
@@ -209,7 +256,11 @@ export function voiceRouter() {
     const buf = req.body as Buffer;
     if (!Buffer.isBuffer(buf) || buf.length % 2) return res.status(400).json({ error: "Envie áudio PCM 16 bits, 16 kHz, mono." });
     const started = Date.now();
-    try { const text = await transcribe(new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length))); res.json({ text, ms: Date.now() - started }); }
+    try {
+      const raw = await transcribe(new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length)));
+      const nb = String(req.query.notebook || ""), text = raw && nb ? fixCodes(raw, notebookCodes(nb)) : raw;
+      res.json({ text, raw, ms: Date.now() - started });
+    }
     catch (e) { res.status(500).json({ error: e instanceof Error ? e.message : String(e) }); }
   });
   r.post("/speak", async (req, res) => {

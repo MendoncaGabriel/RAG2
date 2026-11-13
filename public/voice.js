@@ -5,16 +5,16 @@
 // Usa `conversation`, `detailMode`, `loadMessages`, `loadChats`, `renderMarkdown` e `icons` de app.js.
 (() => {
   const PREF_KEY = 'bento-voice', GREETINGS = ['Às suas ordens.', 'Estou ouvindo.', 'Pois não?', 'Em que posso ajudar?'];
-  const prefs = { voice: 'faber', voiceEn: 'alan', speed: 1, fx: 'jarvis', pause: 800, bargeIn: false, greet: true };
+  const prefs = { voice: 'faber', voiceEn: 'alan', speed: 1, fx: 'jarvis', pause: 1000, bargeIn: false, greet: true, review: false, filter: true };
   try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')) } catch {}
   const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)) } catch {} };
-  const LABEL = { boot: 'Iniciando', listening: 'Ouvindo', hearing: 'Ouvindo você', transcribing: 'Entendendo', thinking: 'Pensando', speaking: 'Falando', muted: 'Microfone pausado', error: 'Atenção' };
+  const LABEL = { review: 'Confira o texto', boot: 'Iniciando', listening: 'Ouvindo', hearing: 'Ouvindo você', transcribing: 'Entendendo', thinking: 'Pensando', speaking: 'Falando', muted: 'Microfone pausado', error: 'Atenção' };
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  let root, canvas, g, ctx, stream, micAn, outAn, fxIn, fxNodes = [], capture, sink, raf = 0, state = 'off', muted = false, used = false, session = 0;
+  let root, canvas, g, ctx, stream, micSrc, lastCapture = null, micAn, outAn, fxIn, fxNodes = [], capture, sink, raf = 0, state = 'off', muted = false, used = false, session = 0;
   let turn = null, progress = 0, levelSm = 0, rot = 0, lastT = 0;
   // VAD: piso de ruído adaptativo, pré-gravação (para não cortar o início da fala) e silêncio final configurável.
-  let noise = 0.004, loud = 0, inSpeech = false, frames = [], pre = [], preMs = 0, speechMs = 0, silentMs = 0, bargeMs = 0;
+  let deafUntil = 0, noise = 0.004, loud = 0, inSpeech = false, frames = [], pre = [], preMs = 0, speechMs = 0, silentMs = 0, bargeMs = 0;
 
   // ---------- Interface ----------
   const css = `
@@ -46,7 +46,9 @@
         <label class="block"><span class="mb-1 block text-white/70">Voz para respostas em inglês</span><select id="vVoiceEn" class="v-field"></select></label>
         <label class="block"><span class="mb-1 flex justify-between text-white/70">Velocidade <b id="vSpeedVal" class="font-medium text-white"></b></span><input id="vSpeed" type="range" min="0.8" max="1.3" step="0.05" class="w-full"></label>
         <label class="block"><span class="mb-1 block text-white/70">Efeito da voz</span><select id="vFx" class="v-field"><option value="jarvis">Jarvis (eco metálico)</option><option value="sutil">Sutil (ambiente)</option><option value="natural">Natural</option></select></label>
-        <label class="block"><span class="mb-1 block text-white/70">Enviar após uma pausa de</span><select id="vPause" class="v-field"><option value="600">0,6 s (ágil)</option><option value="800">0,8 s</option><option value="1200">1,2 s (pausado)</option><option value="1800">1,8 s</option></select></label>
+        <label class="block"><span class="mb-1 block text-white/70">Enviar após uma pausa de</span><select id="vPause" class="v-field"><option value="600">0,6 s (ágil)</option><option value="800">0,8 s</option><option value="1000">1 s (recomendado)</option><option value="1400">1,4 s (pausado)</option><option value="2000">2 s (para pensar)</option></select></label>
+        <label class="flex items-start gap-2 text-white/80"><input id="vReview" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Revisar o texto antes de enviar <span class="block text-xs text-white/50">Corrija o que foi entendido; Enter envia.</span></span></label>
+        <label class="flex items-start gap-2 text-white/80"><input id="vFilter" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Filtro de ruído do navegador <span class="block text-xs text-white/50">Desligue se palavras sumirem; ligue em ambiente barulhento.</span></span></label>
         <label class="flex items-center gap-2 text-white/80"><input id="vBarge" type="checkbox" class="h-4 w-4"> Interromper quando eu falar <span class="text-xs text-white/50">(use fone)</span></label>
         <label class="flex items-center gap-2 text-white/80"><input id="vGreet" type="checkbox" class="h-4 w-4"> Saudação ao abrir</label>
         <p class="border-t border-white/10 pt-3 text-xs text-white/50">Tudo roda no servidor do Bento: <span id="vEngine"></span>. Respostas rápidas/detalhadas seguem o botão do chat.</p>
@@ -57,7 +59,9 @@
     <section class="relative z-10 mx-auto w-full max-w-3xl px-4 text-center sm:px-8">
       <div id="vState" class="v-label text-sm" aria-live="polite"></div>
       <p id="vHint" class="mt-1 min-h-[1.25rem] text-xs text-white/50"></p>
-      <p id="vUser" class="mt-3 hidden text-base italic text-white/70 sm:text-lg"></p>
+      <div id="vUserRow" class="mt-3 hidden items-center justify-center gap-2"><p id="vUser" class="text-base italic text-white/70 sm:text-lg"></p><button id="vReplay" class="v-btn !h-8 !min-w-8 shrink-0 !px-0" title="Ouvir o que o microfone captou" aria-label="Ouvir minha fala"><i data-lucide="volume-2" class="h-4 w-4"></i></button></div>
+      <div id="vReviewBox" class="mt-3 hidden"><textarea id="vReviewText" rows="2" maxlength="5000" class="v-field resize-none text-base" aria-label="Texto entendido, edite se precisar"></textarea>
+        <div class="mt-2 flex justify-center gap-2"><button id="vReviewSend" class="v-btn v-main !h-10"><i data-lucide="send" class="h-4 w-4"></i><span>Enviar</span></button><button id="vReviewRedo" class="v-btn !h-10"><i data-lucide="mic" class="h-4 w-4"></i><span>Falar de novo</span></button><button id="vReplay2" class="v-btn !h-10 !px-3" title="Ouvir o que o microfone captou" aria-label="Ouvir minha fala"><i data-lucide="volume-2" class="h-4 w-4"></i></button></div></div>
       <div id="vAnswer" class="v-answer mt-2 max-h-[30vh] overflow-y-auto py-3 text-left text-[15px] leading-relaxed sm:text-base"></div>
     </section>
     <footer class="relative z-10 flex items-center justify-center gap-3 px-4 pb-6 pt-3 sm:pb-8">
@@ -78,10 +82,15 @@
     const bind = (id, key, parse = v => v, after) => { const e = q(id); e.onchange = e.oninput = () => { prefs[key] = e.type === 'checkbox' ? e.checked : parse(e.value); savePrefs(); after?.() } };
     bind('#vVoice', 'voice', String, warmVoices); bind('#vVoiceEn', 'voiceEn', String, warmVoices); bind('#vSpeed', 'speed', Number, paintPrefs);
     bind('#vFx', 'fx', String, applyFx); bind('#vPause', 'pause', Number); bind('#vBarge', 'bargeIn'); bind('#vGreet', 'greet');
+    bind('#vReview', 'review'); bind('#vFilter', 'filter', undefined, restartMic);
+    q('#vReplay').onclick = q('#vReplay2').onclick = replay;
+    q('#vReviewSend').onclick = sendReview; q('#vReviewRedo').onclick = () => { hideReview(); setState('listening') };
+    q('#vReviewText').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReview() } });
     document.addEventListener('keydown', e => {
       if (root.classList.contains('hidden')) return;
-      if (e.key === 'Escape') { e.preventDefault(); close() }
-      else if (e.target.closest?.('select,input')) return;
+      if (e.key === 'Escape' && state === 'review') { e.preventDefault(); hideReview(); setState('listening') }
+      else if (e.key === 'Escape') { e.preventDefault(); close() }
+      else if (e.target.closest?.('select,input,textarea')) return;
       else if (e.code === 'Space') { if (e.target.closest?.('button')) return; e.preventDefault(); mainAction() } // em botão, o próprio clique nativo age
       else if (e.key === 'm' || e.key === 'M') toggleMute();
     });
@@ -91,6 +100,7 @@
   function paintPrefs() {
     $q('#vVoice').value = prefs.voice; $q('#vVoiceEn').value = prefs.voiceEn; $q('#vSpeed').value = prefs.speed; $q('#vSpeedVal').textContent = `${Number(prefs.speed).toFixed(2).replace('.', ',')}x`;
     $q('#vFx').value = prefs.fx; $q('#vPause').value = String(prefs.pause); $q('#vBarge').checked = !!prefs.bargeIn; $q('#vGreet').checked = !!prefs.greet;
+    $q('#vReview').checked = !!prefs.review; $q('#vFilter').checked = !!prefs.filter;
   }
   function setState(s, hint) {
     state = s; $q('#vState').textContent = LABEL[s] || '';
@@ -99,7 +109,13 @@
     main.classList.toggle('invisible', !label);
     if (label) { main.innerHTML = `<i data-lucide="${label[0]}" class="h-4 w-4"></i><span>${label[1]}</span>`; icons() }
   }
-  const showUser = text => { const u = $q('#vUser'); u.textContent = text ? `“${text}”` : ''; u.classList.toggle('hidden', !text) };
+  const showUser = text => { $q('#vUser').textContent = text ? `“${text}”` : ''; const r = $q('#vUserRow'); r.classList.toggle('hidden', !text); r.classList.toggle('flex', !!text); $q('#vReplay').classList.toggle('hidden', !lastCapture) };
+  // Revisão: mostra o texto entendido para corrigir antes de perguntar (opcional).
+  function showReview(text) { showUser(''); const box = $q('#vReviewBox'), ta = $q('#vReviewText'); box.classList.remove('hidden'); ta.value = text; setState('review', 'Enter envia · Esc descarta'); ta.focus(); ta.setSelectionRange(text.length, text.length) }
+  function hideReview() { $q('#vReviewBox').classList.add('hidden') }
+  function sendReview() { const text = $q('#vReviewText').value.trim(); hideReview(); if (!text) return setState('listening'); turn = { ctrl: new AbortController(), queue: [], text: '', cursor: 0, buf: '', final: false, first: true, playing: false, src: null }; ask(text, turn); $q('#vMain').focus() }
+  // Toca o áudio exatamente como foi enviado para a transcrição: mostra se o problema é o microfone/corte ou o modelo.
+  function replay() { if (!ctx || !lastCapture) return; const b = ctx.createBuffer(1, lastCapture.length, 16000); b.copyToChannel(lastCapture, 0); const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination); s.start(); deafUntil = performance.now() + b.duration * 1000 + 400; resetVad() }
   let paintQueued = false;
   function paintAnswer() {
     if (paintQueued) return; paintQueued = true;
@@ -109,7 +125,7 @@
   // ---------- Abrir / fechar ----------
   async function open() {
     if (typeof conversation === 'undefined' || !conversation) return toast('Abra uma conversa primeiro');
-    build(); paintPrefs(); used = false; muted = false; turn = null; showUser(''); $q('#vAnswer').innerHTML = ''; delete $q('#vAnswer').dataset.text;
+    build(); paintPrefs(); used = false; muted = false; turn = null; lastCapture = null; hideReview(); showUser(''); $q('#vAnswer').innerHTML = ''; delete $q('#vAnswer').dataset.text;
     $q('#vBook').textContent = document.getElementById('bookTitle')?.textContent || '';
     $q('#vMute').setAttribute('aria-pressed', 'false');
     root.classList.remove('hidden'); document.body.style.overflow = 'hidden'; $q('#vMain').focus();
@@ -118,8 +134,7 @@
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw Error('O navegador só libera o microfone em HTTPS ou em http://localhost. Acesse o Bento por um desses endereços.');
       ctx = new AudioContext({ latencyHint: 'interactive' });
-      const micReq = navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } })
-        .catch(e => { throw Error(e?.name === 'NotAllowedError' ? 'Permissão do microfone negada. Libere o microfone para este site no ícone de cadeado da barra de endereço.' : e?.name === 'NotFoundError' ? 'Nenhum microfone encontrado.' : `Microfone indisponível: ${e?.message || e}`) });
+      const micReq = getMic().catch(e => { throw Error(e?.name === 'NotAllowedError' ? 'Permissão do microfone negada. Libere o microfone para este site no ícone de cadeado da barra de endereço.' : e?.name === 'NotFoundError' ? 'Nenhum microfone encontrado.' : `Microfone indisponível: ${e?.message || e}`) });
       const [, s] = await Promise.all([ensureModels(my), micReq]);
       if (my !== session) return s.getTracks().forEach(t => t.stop());
       stream = s; await setupAudio();
@@ -136,7 +151,7 @@
     try { stream?.getTracks().forEach(t => t.stop()) } catch {}
     try { capture?.port && (capture.port.onmessage = null) } catch {}
     try { ctx?.close() } catch {}
-    stream = ctx = capture = micAn = outAn = fxIn = null; fxNodes = []; state = 'off';
+    hideReview(); stream = ctx = capture = micSrc = micAn = outAn = fxIn = null; fxNodes = []; state = 'off';
     root.classList.add('hidden'); document.body.style.overflow = ''; $q('#vSettings').classList.add('hidden');
     // As perguntas e respostas faladas foram salvas na conversa: atualiza o chat ao sair.
     if (used) { loadMessages().catch(() => {}); loadChats().catch(() => {}) }
@@ -171,9 +186,21 @@
 
   // ---------- Áudio: microfone, efeitos e sons de interface ----------
   const WORKLET = `class C extends AudioWorkletProcessor{constructor(){super();this.b=new Float32Array(1024);this.n=0}process(i){const c=i[0]&&i[0][0];if(c)for(let k=0;k<c.length;k++){this.b[this.n++]=c[k];if(this.n===1024){this.port.postMessage(this.b.slice(0));this.n=0}}return true}}registerProcessor('bento-capture',C)`;
+  // Eco cancelado sempre (a resposta sai pelo alto-falante); ganho automático ligado (volume baixo foi o pior caso nos testes);
+  // filtro de ruído opcional: limpa o fundo, mas às vezes come finais de palavra.
+  const getMic = () => navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: !!prefs.filter, autoGainControl: true, channelCount: 1 } });
+  async function restartMic() {
+    if (!ctx || !stream) return;
+    try {
+      const s = await getMic(); stream.getTracks().forEach(t => t.stop()); stream = s;
+      micSrc?.disconnect(); micSrc = ctx.createMediaStreamSource(stream); micSrc.connect(micAn); micSrc.connect(capture);
+      if (muted) stream.getAudioTracks().forEach(t => t.enabled = false);
+      resetVad(); toast(prefs.filter ? 'Filtro de ruído ligado' : 'Filtro de ruído desligado');
+    } catch (e) { fail(e) }
+  }
   async function setupAudio() {
     if (ctx.state === 'suspended') await ctx.resume();
-    const src = ctx.createMediaStreamSource(stream);
+    const src = micSrc = ctx.createMediaStreamSource(stream);
     micAn = ctx.createAnalyser(); micAn.fftSize = 256; micAn.smoothingTimeConstant = 0.6; src.connect(micAn);
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'text/javascript' }));
     try { await ctx.audioWorklet.addModule(url) } finally { URL.revokeObjectURL(url) }
@@ -219,10 +246,11 @@
   // ---------- Detecção de fala ----------
   function resetVad() { inSpeech = false; loud = 0; frames = []; pre = []; preMs = 0; speechMs = 0; silentMs = 0; bargeMs = 0 }
   function onFrame(f) {
-    if (!ctx || muted) return;
+    if (!ctx || muted || performance.now() < deafUntil) return;
     let sum = 0; for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
     const rms = Math.sqrt(sum / f.length), ms = f.length / ctx.sampleRate * 1000;
-    pre.push(f); preMs += ms; while (preMs > 450 && pre.length > 1) { preMs -= pre.shift().length / ctx.sampleRate * 1000 }
+    // 0,6 s de pré-gravação: cortar o início da fala foi o que mais aumentou erros nos testes (de 17% para 28%).
+    pre.push(f); preMs += ms; while (preMs > 600 && pre.length > 1) { preMs -= pre.shift().length / ctx.sampleRate * 1000 }
     if (state === 'listening' || state === 'hearing') vad(f, rms, ms);
     else if (prefs.bargeIn && (state === 'speaking' || state === 'thinking')) {
       // Interromper falando: limiar bem mais alto para não confundir o eco da própria voz com o usuário.
@@ -249,21 +277,29 @@
     earcon('send'); setState('transcribing', 'Transcrevendo sua fala…');
     const my = session, ctrl = new AbortController(); turn = { ctrl, queue: [], text: '', cursor: 0, buf: '', final: false, first: true, playing: false, src: null, transcribing: true };
     try {
-      const r = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: toPcm16(pcmFrames, sr), signal: ctrl.signal });
+      const nb = typeof notebook !== 'undefined' && notebook ? `?notebook=${encodeURIComponent(notebook)}` : '';
+      const r = await fetch(`/api/voice/transcribe${nb}`, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: toPcm16(pcmFrames, sr), signal: ctrl.signal });
       if (r.status === 401) return location.replace('/login.html');
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw Error(j.error || `Erro ${r.status} na transcrição.`);
       if (my !== session || turn?.ctrl !== ctrl) return;
       const text = String(j.text || '').trim();
       if (!/[\p{L}\p{N}]{2,}/u.test(text)) { turn = null; return setState('listening', 'Não entendi. Pode repetir?') }
+      if (prefs.review) { turn = null; return showReview(text) }
       turn.transcribing = false; ask(text, turn);
     } catch (e) { if (!ctrl.signal.aborted && my === session) { turn = null; setState('listening', e.message || String(e)); earcon('error') } }
   }
-  // Junta os quadros, reamostra para 16 kHz (média por janela = filtro anti-aliasing simples) e converte para PCM 16 bits.
+  // Junta os quadros, reamostra para 16 kHz (média por janela: nos testes, mesma precisão do reamostrador do sherpa),
+  // normaliza o volume (fala baixa dobrava os erros) e converte para PCM 16 bits. Guarda o áudio para "ouvir minha fala".
   function toPcm16(fr, rate) {
     const total = fr.reduce((n, f) => n + f.length, 0), all = new Float32Array(total); let o = 0; for (const f of fr) { all.set(f, o); o += f.length }
-    const ratio = rate / 16000, n = Math.floor(total / ratio), out = new Int16Array(n);
-    for (let i = 0; i < n; i++) { const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let s = 0; for (let k = a; k < b; k++) s += all[k]; const v = s / (b - a); out[i] = Math.max(-32768, Math.min(32767, Math.round(v * 32767))) }
+    const ratio = rate / 16000, n = Math.floor(total / ratio), mono = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let s = 0; for (let k = a; k < b; k++) s += all[k]; mono[i] = s / (b - a) }
+    // Pico robusto (ignora estalos isolados): 99,9º percentil do módulo; ganho até 10x, sem saturar.
+    const abs = Float32Array.from(mono, Math.abs).sort(), peak = abs[Math.floor(abs.length * 0.999)] || 0, gain = peak > 1e-4 ? Math.min(10, Math.max(1, 0.5 / peak)) : 1;
+    const out = new Int16Array(n);
+    for (let i = 0; i < n; i++) { const v = Math.max(-1, Math.min(1, mono[i] * gain)); mono[i] = v; out[i] = Math.round(v * 32767) }
+    lastCapture = mono;
     return out.buffer;
   }
 
@@ -350,7 +386,8 @@
     if (!silent && ctx) setState(muted ? 'muted' : 'listening', t && !t.final && !t.quiet && !t.transcribing ? 'Interrompido. A pergunta ficou na conversa, sem resposta salva.' : undefined);
   }
   function mainAction() {
-    if (state === 'hearing') finishSpeech();
+    if (state === 'review') sendReview();
+    else if (state === 'hearing') finishSpeech();
     else if (state === 'transcribing' || state === 'thinking' || state === 'speaking') interrupt();
     else if (state === 'muted') toggleMute();
     else if (state === 'error') { close(); open() }

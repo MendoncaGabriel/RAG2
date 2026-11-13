@@ -1,7 +1,28 @@
 // Modo de voz (sem modelos): limpeza do texto falado, normalização pt-BR e escolha do idioma da voz.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-const { speechText, normalizePt, detectLang } = await import("../src/voice.js");
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-voice-"));
+process.env.DATABASE_PATH = path.join(tmp, "test.sqlite");
+process.env.UPLOAD_DIR = path.join(tmp, "uploads");
+const { speechText, normalizePt, detectLang, fixCodes } = await import("../src/voice.js");
+
+test("transcrição: códigos do notebook ditos em voz alta voltam ao formato exato", () => {
+  const codes = ["APP-MES", "SRV-MAO", "FOR-002", "GW-OT", "APP-BI", "PRJ-ARARA"];
+  assert.equal(fixCodes("Quem é o responsável pelo app mês?", codes), "Quem é o responsável pelo APP-MES?");
+  assert.equal(fixCodes("Qual o status do servidor SRV Mau?", codes), "Qual o status do servidor SRV-MAO?");
+  assert.equal(fixCodes("Me fale do formulário for002.", codes), "Me fale do formulário FOR-002.");
+  assert.equal(fixCodes("Quem é o responsável pelo Apmes?", codes), "Quem é o responsável pelo APP-MES?");
+  assert.equal(fixCodes("o apmes e o aplicativo", codes), "o apmes e o aplicativo"); // minúscula: pode ser palavra comum
+  assert.equal(fixCodes("E o GW OT e o app BI, e o PRJ Arara?", codes), "E o GW-OT e o APP-BI, e o PRJ-ARARA?");
+  // Frases comuns não podem ser alteradas.
+  assert.equal(fixCodes("O app de mesa está no servidor de marketing.", codes), "O app de mesa está no servidor de marketing.");
+  assert.equal(fixCodes("Para mim o formulário foi aprovado.", codes), "Para mim o formulário foi aprovado.");
+  assert.equal(fixCodes("Qualquer coisa", []), "Qualquer coisa");
+});
 
 test("texto falado: remove markdown, tabelas, fontes, links e emojis", () => {
   assert.equal(speechText("1. **Primeiro** item [Fonte 2]"), "1, Primeiro item");
