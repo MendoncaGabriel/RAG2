@@ -12,13 +12,12 @@ const src = path.resolve(arg("src", path.join(root, "src")));
 const label = arg("label", path.basename(path.dirname(src)));
 const out = arg("out", "");
 const only = arg("only", "").split(",").filter(Boolean);
-const chatModel = process.env.BENCH_CHAT_MODEL || "qwen2.5:1.5b", embeddingModel = process.env.BENCH_EMBED_MODEL || "bge-m3";
+const chatModel = process.env.BENCH_CHAT_MODEL || "qwen2.5:3b", embeddingModel = process.env.BENCH_EMBED_MODEL || "bge-m3";
 const ollama = process.env.BENCH_OLLAMA_URL || "http://localhost:11434";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-bench-"));
 process.env.DATABASE_PATH = path.join(tmp, "bench.sqlite");
 process.env.UPLOAD_DIR = path.join(tmp, "uploads");
-process.env.CONVERSATION_SUMMARY = "false";
 const load = (m: string) => import(pathToFileURL(path.join(src, m)).href);
 const { db } = await load("database.ts");
 const ai = await load("ai.ts");

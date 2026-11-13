@@ -1,6 +1,6 @@
 # Uso: docker compose up -d --build   -> app em http://localhost:${PORT:-3000}
 # Sobe junto o Ollama e baixa os modelos de chat e embeddings (primeira vez: alguns minutos, ~2 GB).
-# Na primeira inicialização o app já cadastra e ativa esse Ollama; outros provedores podem ser adicionados em Configurações.
+# Na primeira inicialização o app já cadastra e ativa esse Ollama; outros servidores Ollama podem ser adicionados em Configurações.
 # O app só inicia depois que os modelos terminam de baixar. Acompanhe com: docker compose logs -f ollama-init
 # Obs.: docker-compose.linux.yml (network_mode host) não alcança o Ollama por nome; use-o só com IA externa.
 name: rag
@@ -29,7 +29,7 @@ services:
         condition: service_healthy
     environment:
       OLLAMA_HOST: http://ollama:11434
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:3b}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
     entrypoint: ["/bin/sh", "-c", "ollama pull $$OLLAMA_CHAT_MODEL && ollama pull $$OLLAMA_EMBEDDING_MODEL"]
 
@@ -56,24 +56,22 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-true}
       PORT: 3000
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:1.5b}
+      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:3b}
       OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
       OCR_LANG: ${OCR_LANG:-por+eng}
       CHUNK_SIZE: ${CHUNK_SIZE:-700}
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
-      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-3}
+      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-}
       MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.48}
-      MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-7500}
-      NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-2}
-      QUERY_EXPANSION: ${QUERY_EXPANSION:-false}
-      SCOPE_CHECK: ${SCOPE_CHECK:-true}
+      MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-}
+      NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
       DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
-      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-400}
+      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
       OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-6}
       MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
     volumes:
       - ./data:/app/data
-    # Permite cadastrar provedores locais do host (ex.: http://host.docker.internal:11434) nas Configurações.
+    # Permite cadastrar o Ollama do host (ex.: http://host.docker.internal:11434) nas Configurações.
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

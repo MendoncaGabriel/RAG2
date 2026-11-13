@@ -4,7 +4,7 @@ Este arquivo orienta o Claude Code ao trabalhar neste repositório.
 
 ## Visão geral
 
-RAG Local: aplicação de RAG com notebooks independentes. Backend Express 5 + TypeScript (ESM), SQLite via `node:sqlite` (Node >= 22.13, sem dependências nativas para o banco) e frontend estático em `public/` (JS puro, sem build). Os provedores de IA (Ollama, OpenAI e compatíveis, Gemini, Anthropic) são cadastrados na tela de Configurações, não no ambiente.
+RAG Local: aplicação de RAG com notebooks independentes. Backend Express 5 + TypeScript (ESM), SQLite via `node:sqlite` (Node >= 22.13, sem dependências nativas para o banco) e frontend estático em `public/` (JS puro, sem build). A IA é exclusivamente o Ollama: servidores Ollama são cadastrados na tela de Configurações, não no ambiente. Não adicionar integrações com OpenAI, Gemini, Anthropic/Claude ou outros provedores.
 
 ## Comandos
 
@@ -13,7 +13,7 @@ npm install
 npm run dev        # tsx watch em src/server.ts (http://localhost:3000)
 npm run typecheck  # tsc --noEmit
 npm test           # testes determinísticos (sem LLM): chunking, registros, filtros, cálculos
-npm run bench -- --label nova --out bench.json   # benchmark ponta a ponta com Ollama (qwen2.5:1.5b + bge-m3)
+npm run bench -- --label nova --out bench.json   # benchmark ponta a ponta com Ollama (qwen2.5:3b + bge-m3; use `BENCH_CHAT_MODEL` para outro modelo)
 npm run build      # tsc -> dist/
 npm start          # node dist/server.js
 docker compose up -d --build   # sobe app + Ollama + modelos (OLLAMA_*); dados em ./data
@@ -23,15 +23,16 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 
 ## Estrutura
 
-- [src/server.ts](src/server.ts): rotas da API, upload (multer), autenticação, apresentação pública (`/api/present/:id/ask`, NDJSON em streaming).
+- [src/server.ts](src/server.ts): rotas da API, upload (multer), autenticação, chat incorporável via iframe (`/api/present/:id/ask`, NDJSON em streaming).
 - [src/chunking.ts](src/chunking.ts): chunking estrutural (seções no prefixo `[Seção: …]`, tabelas por grupos de linhas com cabeçalho repetido, listas inteiras).
 - [src/structured.ts](src/structured.ts): registros de tabelas/fichas (`records`), interpretação da pergunta (`analyzeQuery`) e respostas determinísticas (filtros, contagem, soma, média, ordenação, listagem completa) e registros exatos por código.
-- [src/rag.ts](src/rag.ts): busca híbrida (semântica + BM25-like com RRF), `modelProfile` (topK, contexto, max tokens por tamanho de modelo), construção do prompt e `ask`.
-- [src/ai.ts](src/ai.ts): abstração dos provedores (chat em streaming, embeddings, listagem de modelos, testes). Opções do Ollama (`num_ctx`, `num_predict`, `num_thread`) ficam aqui.
+- [src/rag.ts](src/rag.ts): busca híbrida (semântica + BM25-like com RRF), construção do prompt por perfil e `ask`.
+- [src/modelprofile.ts](src/modelprofile.ts): reconhecimento do modelo (tamanho, família, contexto, raciocínio) e perfil de geração e recuperação derivado dele; prefixos de embeddings.
+- [src/ai.ts](src/ai.ts): cliente do Ollama (chat em streaming, embeddings, listagem de modelos, testes). Opções do Ollama (`num_ctx`, `num_predict`, `num_thread`) ficam aqui.
 - [src/documents.ts](src/documents.ts): extração de texto (PDF, DOCX, PPTX, XLSX, imagens com OCR…), indexação e reindexação.
 - [src/database.ts](src/database.ts): schema SQLite (notebooks, documents, chunks, conversations, messages, saved_messages, provedores).
 - [src/auth.ts](src/auth.ts): login com usuário mestre + JWT em cookie, rate limit.
-- [public/](public/): `app.js` (UI principal, minificado em poucas linhas), `settings.js`, `login.html`, `present.html`.
+- [public/](public/): `app.js` (UI principal, minificado em poucas linhas), `settings.js`, `login.html`, `embed.html`.
 - [docker/start.mjs](docker/start.mjs): entrypoint do container.
 
 ## Convenções
@@ -43,9 +44,9 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 - Trocar o modelo de embeddings exige reindexar; a busca retorna `incompatible` se os vetores divergirem.
 - O Ollama recarrega o modelo quando `num_ctx` muda entre chamadas: todas as chamadas de chat usam `chatContext()` para o mesmo valor.
 
-## Ajuste de desempenho (modelos pequenos/CPU)
+## Ajuste automático por modelo (modelos locais, CPU)
 
-`modelProfile` em `src/rag.ts` deriva o perfil do tamanho no nome do modelo (`mini` < 1B, `pequeno` < 2,5B, `médio` < 10B, `grande`). Perfis mini/pequeno usam topK 2–3, `num_ctx` 2048, `num_predict` 150, temperatura 0 e sem chunks vizinhos. Sobrescritas por ambiente: `RETRIEVAL_TOP_K`, `MAX_CONTEXT_CHARS`, `CHAT_MAX_TOKENS`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `OLLAMA_NUM_THREAD`, `QUERY_EXPANSION` (desligado por padrão: custa uma geração extra).
+O RAG reconhece o modelo de chat ativo e deriva o perfil de uso dele ([src/modelprofile.ts](src/modelprofile.ts), `deriveProfile`), sem depender de um modelo específico. Tamanho, contexto nativo e capacidades vêm do Ollama (`/api/show`, em cache em `refreshModelInfo`) ou, se indisponível, do nome. Faixas de tamanho: `mini` < 1B, `pequeno` < 2,5B, `médio` < 6B, `grande` < 14B, `avançado`. Mini/pequeno usam prompt mínimo, topK 2–3, `num_ctx` 3072, `num_predict` 400, sem vizinhos nem histórico; do médio em diante, prompt com regras, mais contexto/topK e histórico. A família (qwen3, qwen2, llama, gemma, phi, mistral) ajusta `top_p`, `top_k` e a penalidade de repetição; o contexto nunca passa do nativo do modelo; modelos que só raciocinam (`*-thinking`, DeepSeek-R1, gpt-oss) não recebem `think: false`, ganham folga de saída. Não há verificação de escopo separada: o próprio modelo decide se responde ou recusa (regra de recusa do prompt); se a busca estrita não achar nada, `ask` tenta a pergunta original e depois uma busca relaxada (`hybridSearch(..., relaxed)`) com até 3 trechos. Modelos de embeddings com prefixo de consulta/documento (nomic, e5, mxbai, snowflake-arctic, qwen3-embedding, embeddinggemma) são tratados em `embeddingPrefix`. Sobrescritas por ambiente: `RETRIEVAL_TOP_K`, `MAX_CONTEXT_CHARS`, `CHAT_MAX_TOKENS`, `NEIGHBOR_EXPAND_TOP`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `OLLAMA_NUM_THREAD`. O botão Testar da tela de Configurações mostra o perfil detectado.
 
 ## Cuidados
 

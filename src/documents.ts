@@ -12,7 +12,6 @@ import { db, uploadDir } from "./database.js";
 import { embedMany, normalizeText } from "./rag.js";
 import { chunkStructured } from "./chunking.js";
 import { csvToMarkdown, rowsToMarkdown, saveRecords } from "./structured.js";
-import { activeProvider } from "./ai.js";
 
 export function fixMojibake(value: string): string {
   if (!/[ÃÂâð]/.test(value)) return value;
@@ -103,11 +102,11 @@ function readPptx(filePath: string, onProgress?: (progress: number) => void): Pr
 
 type ProcessingJob = { id: string; notebookId: string; filePath: string | null; name: string; text?: string; resolve: () => void; reject: (error: unknown) => void };
 // Trechos por requisição de embedding; menor = barra de progresso mais precisa.
-const embedBatch = () => Math.min(64, Math.max(1, Number(process.env.EMBED_BATCH_SIZE) || (activeProvider("embedding")?.kind === "ollama" ? 2 : 8)));
-// Provedores hospedados aceitam requisições paralelas; o Ollama local processa uma por vez, então paralelizar só atrapalha.
-const embedConcurrency = () => Math.min(6, Math.max(1, Number(process.env.EMBED_CONCURRENCY) || (activeProvider("embedding")?.kind === "ollama" ? 1 : 3)));
+const embedBatch = () => Math.min(64, Math.max(1, Number(process.env.EMBED_BATCH_SIZE) || 2));
+// O Ollama local processa uma requisição de embedding por vez, então paralelizar só atrapalha.
+const embedConcurrency = () => Math.min(6, Math.max(1, Number(process.env.EMBED_CONCURRENCY) || 1));
 
-// Gera os embeddings em lotes, com lotes em paralelo quando o provedor permite, e grava o progresso real na ordem.
+// Gera os embeddings em lotes, com lotes em paralelo quando EMBED_CONCURRENCY permite, e grava o progresso real na ordem.
 // Retorna null se o documento foi excluído no meio do processamento.
 async function embedChunks(allTexts: string[], id: string, aliveSql: string, aliveArgs: string[], base = 25): Promise<number[][] | null> {
   // Trechos idênticos (cabeçalhos repetidos, tabelas) são embeddados uma só vez e o vetor é reaproveitado.

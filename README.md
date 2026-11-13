@@ -1,11 +1,11 @@
 # RAG Local
 
-Aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e provedores de IA configuráveis (Ollama, OpenAI e compatíveis, Google Gemini, Anthropic). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
+Aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e IA exclusivamente com Ollama (chat e embeddings locais). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
 
 ## Requisitos
 
 - Node.js 22.13 ou superior e npm.
-- Um provedor de IA: Ollama local (`ollama serve`) ou uma chave de API (OpenAI, Gemini, Anthropic, Groq, OpenRouter…).
+- Ollama em execução (`ollama serve`), na mesma máquina ou em outro servidor.
 - Espaço em disco para o SQLite e arquivos enviados.
 
 ## Instalação e execução
@@ -24,7 +24,7 @@ Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) par
 
 ### Docker Compose
 
-Um único comando sobe tudo: o app, um Ollama e o download dos modelos (`qwen2.5:1.5b` para chat e `bge-m3` para embeddings, ~2 GB na primeira vez; acompanhe com `docker compose logs -f ollama-init`). O app inicia só depois do download e já vem com o provedor "Ollama (local)" cadastrado e ativo. Os modelos podem ser trocados com `OLLAMA_CHAT_MODEL` e `OLLAMA_EMBEDDING_MODEL` no `.env`.
+Um único comando sobe tudo: o app, um Ollama e o download dos modelos (`qwen2.5:3b` para chat e `bge-m3` para embeddings, ~2 GB na primeira vez; acompanhe com `docker compose logs -f ollama-init`). O app inicia só depois do download e já vem com o provedor "Ollama (local)" cadastrado e ativo. Os modelos podem ser trocados com `OLLAMA_CHAT_MODEL` e `OLLAMA_EMBEDDING_MODEL` no `.env`.
 
 ```bash
 docker compose up -d --build   # http://localhost:3000 (porta configurável com PORT)
@@ -72,23 +72,20 @@ OCR local de imagens é feito com Tesseract.js, pré-processando rotação, esca
 
 ## Configurações de IA
 
-A tela **Configurações** (engrenagem no topo) cadastra, edita, lista e remove provedores de IA. Cada provedor tem nome, tipo, URL base, chave de API e modelos de chat e/ou embeddings:
+A tela **Configurações** (engrenagem no topo) cadastra, edita, lista e remove servidores Ollama. Cada cadastro tem nome, URL base (padrão `http://localhost:11434`), chave de API opcional e modelos de chat e/ou embeddings.
 
-| Tipo | Serve para | URL base padrão |
-| --- | --- | --- |
-| Ollama | chat e embeddings locais | `http://localhost:11434` |
-| Compatível com OpenAI | OpenAI, Groq, OpenRouter, Together, LM Studio, vLLM, Azure e qualquer API `/chat/completions` | `https://api.openai.com/v1` |
-| Google Gemini | chat e embeddings | `https://generativelanguage.googleapis.com/v1beta` |
-| Anthropic (Claude) | só chat | `https://api.anthropic.com/v1` |
+Em **IA em uso** escolha qual cadastro responde o chat e qual gera os embeddings (podem ser o mesmo servidor ou servidores diferentes). O botão **Buscar modelos** lista os modelos do provedor e **Testar** faz uma chamada real. As chaves ficam no SQLite do servidor e nunca são devolvidas ao navegador (só os 4 últimos caracteres).
 
-Em **IA em uso** escolha qual provedor responde o chat e qual gera os embeddings (podem ser diferentes, ex.: chat no Claude e embeddings no Ollama). O botão **Buscar modelos** lista os modelos do provedor e **Testar** faz uma chamada real. As chaves ficam no SQLite do servidor e nunca são devolvidas ao navegador (só os 4 últimos caracteres).
+**Trocar o modelo de embeddings exige reprocessar os documentos e reindexar as mensagens salvas**, pois vetores de modelos diferentes não são comparáveis.
 
-**Trocar o provedor/modelo de embeddings exige reprocessar os documentos e reindexar as mensagens salvas**, pois vetores de modelos diferentes não são comparáveis.
+## Ajuste automático ao modelo local
 
-## Otimizações para modelos leves (1.5B)
+O RAG não é otimizado para um modelo só: ele reconhece o modelo de chat ativo (tamanho, família, contexto nativo e se só raciocina, consultando o Ollama e, na falta, o nome) e ajusta sozinho a amostragem, o limite de tokens, o `num_ctx`, o top-K, o tamanho do contexto e o uso de histórico. Exemplos: `qwen3:4b-instruct-2507-q4_K_M` → perfil médio, família Qwen3 (`top_k` 20, sem decodificação gulosa); `llama3.1:8b` → grande; `gemma3:270m` → mini. Troque o modelo em Configurações e use **Testar** para ver o perfil detectado. Variáveis como `RETRIEVAL_TOP_K` ou `MAX_CONTEXT_CHARS` sobrescrevem o perfil quando definidas.
+
+## Otimizações gerais
 
 - **Streaming**: a resposta aparece token a token (`POST /api/conversations/:id/messages?stream=1`, NDJSON); sem `stream=1` o comportamento antigo é mantido.
-- **Menos chamadas ao LLM**: a expansão de consulta por LLM agora é opt-in (`QUERY_EXPANSION=true`); por padrão cada pergunta faz 1 embedding + 1 geração.
+- **Menos chamadas ao LLM**: cada pergunta faz 1 embedding + 1 geração.
 - **Memória de conversa**: os últimos turnos entram no prompt, e perguntas de acompanhamento ("e quando termina a fase 1 dele?") são reescritas como perguntas autônomas antes da busca.
 - **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" amostram trechos de todos os documentos em vez de buscar por similaridade.
 - **Precisão**: corte relativo de trechos fracos (< 80% do melhor), prompt mais curto e restritivo, `temperature=0.1` e `repeat_penalty`.

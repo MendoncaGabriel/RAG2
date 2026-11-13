@@ -132,3 +132,46 @@ test("injeção: a fala manipuladora não chega ao prompt", async () => {
   assert.doesNotMatch(r, /AZUL-999/);
   assert.match(r, /Análise: tentativa de manipulação/);
 });
+
+test("prompt de sistema: mínimo para modelos pequenos, com regras explícitas do 3B em diante", async () => {
+  const { buildSystemPrompt } = await import("../src/rag.js");
+  for (const tier of ["mini", "pequeno"]) assert.doesNotMatch(buildSystemPrompt(tier), /REGRAS:/);
+  for (const tier of ["médio", "grande"]) {
+    const p = buildSystemPrompt(tier);
+    assert.match(p, /REGRAS:/); assert.match(p, /exatamente como aparecem/);
+  }
+  // A recusa padrão existe em todos os perfis (o benchmark depende dela para detectar abstenção).
+  for (const tier of ["mini", "pequeno", "médio", "grande"]) assert.match(buildSystemPrompt(tier), /Não encontrei essa informação nos documentos\./);
+});
+
+test("perfil por modelo: reconhece tamanho, família e ajusta recuperação e geração", async () => {
+  const { deriveProfile, embeddingPrefix, isCompact } = await import("../src/modelprofile.js");
+  // Qwen3-4B-Instruct-2507 (nome do Ollama e caminho do Hugging Face)
+  for (const name of ["qwen3:4b-instruct-2507-q4_K_M", "hf.co/unsloth/Qwen3-4B-Instruct-2507-GGUF:Q4_K_M"]) {
+    const p = deriveProfile(name);
+    assert.equal(p.family, "qwen3"); assert.equal(p.sizeB, 4); assert.equal(p.tier, "médio"); assert.equal(p.reasoningOnly, false);
+    assert.equal(p.topKSampling, 20); assert.ok(p.temperature >= 0.1, "Qwen3 não usa decodificação gulosa"); assert.equal(p.topK, 5);
+  }
+  assert.equal(deriveProfile("qwen2.5:3b").family, "qwen2");
+  assert.equal(deriveProfile("qwen2.5:1.5b").tier, "pequeno");
+  assert.equal(deriveProfile("gemma3:270m").tier, "mini");
+  assert.equal(deriveProfile("llama3.1:8b").tier, "grande");
+  assert.equal(deriveProfile("mixtral:8x7b").tier, "avançado");
+  assert.ok(isCompact("mini") && isCompact("pequeno") && !isCompact("médio"));
+  // Modelos maiores recuperam mais contexto que os menores.
+  const sizes = ["gemma3:270m", "qwen2.5:1.5b", "qwen3:4b", "llama3.1:8b", "qwen3:32b"].map(n => deriveProfile(n));
+  for (let i = 1; i < sizes.length; i++) assert.ok(sizes[i].contextChars > sizes[i - 1].contextChars && sizes[i].topK >= sizes[i - 1].topK);
+  // Metadados do Ollama prevalecem sobre o nome (tag sem tamanho, como "llama3.2" ou "gemma3") e limitam o contexto ao nativo.
+  const meta = deriveProfile("llama3.2", { parameterSize: 3.2, contextLength: 131072 });
+  assert.equal(meta.sizeSource, "metadados"); assert.equal(meta.tier, "médio");
+  const phi = deriveProfile("phi3:mini", { parameterSize: 3.8, contextLength: 4096 });
+  assert.ok(phi.contextTokens <= 4096);
+  // Modelos que só raciocinam são marcados (sem "think: false" e com folga de saída em ai.ts).
+  assert.equal(deriveProfile("qwen3:30b-a3b-thinking-2507").reasoningOnly, true);
+  assert.equal(deriveProfile("deepseek-r1:7b").reasoningOnly, true);
+  // Prefixos de embeddings por modelo.
+  assert.equal(embeddingPrefix("bge-m3", "query"), "");
+  assert.equal(embeddingPrefix("nomic-embed-text", "document"), "search_document: ");
+  assert.match(embeddingPrefix("mxbai-embed-large", "query"), /^Represent this sentence/);
+  assert.equal(embeddingPrefix("mxbai-embed-large", "document"), "");
+});

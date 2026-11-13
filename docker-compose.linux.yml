@@ -1,5 +1,5 @@
 # Override para servidores Linux com IA local (ex.: Ollama) escutando só em 127.0.0.1.
-# O container usa a rede do host, então "localhost" é o próprio servidor: cadastre o provedor com http://127.0.0.1:11434.
+# O container usa a rede do host, então "localhost" é o próprio servidor: use http://127.0.0.1:11434 como URL do Ollama.
 # Uso: docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
 # Requer Docker Compose 2.24+.
 services:

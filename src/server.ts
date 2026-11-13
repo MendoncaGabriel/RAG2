@@ -5,18 +5,20 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, summarizeConversation, uuid } from "./rag.js";
-import { activeProvider, activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
+import { ask, chatContext, ensureSavedMessageEmbeddings, generationProfile, invalidateIndex, prepareModel, uuid } from "./rag.js";
+import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
+import { isCompact } from "./modelprofile.js";
 import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
 import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
 const app = express(), upload = multer({ dest: uploadDir, limits: { fileSize: Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024, files: 50 } });
 if (process.env.TRUST_PROXY === "true") app.set("trust proxy", 1);
 app.disable("x-powered-by");
-app.use((_req, res, next) => { res.set({ "x-content-type-options": "nosniff", "x-frame-options": "DENY", "referrer-policy": "same-origin" }); next(); });
+// Só a página de embed pode ser colocada em iframe de outros sites; o restante do sistema continua protegido contra clickjacking.
+app.use((req, res, next) => { res.set({ "x-content-type-options": "nosniff", "referrer-policy": "same-origin" }); if (req.path !== "/embed.html") res.set("x-frame-options", "DENY"); next(); });
 app.use(express.json({ limit: "2mb" }));
 const isPublicNotebook = (id: string) => !!db.prepare("SELECT 1 FROM notebooks WHERE id=? AND is_public=1").get(id);
-// Autenticação e telas de apresentação: acessíveis sem login (as privadas exigem login).
+// Autenticação e chat incorporável (embed): acessíveis sem login (as privadas exigem login).
 app.post("/api/auth/login", login);
 app.post("/api/auth/logout", logout);
 app.get("/api/auth/me", (req, res) => currentUser(req) ? res.json({ ok: true }) : res.sendStatus(401));
@@ -25,7 +27,7 @@ app.get("/api/present/:id", (req, res) => {
   const nb = db.prepare("SELECT name FROM notebooks WHERE id=?").get(req.params.id) as { name: string } | undefined;
   return nb ? res.json({ name: nb.name }) : res.sendStatus(404);
 });
-// A apresentação não grava nada no banco: o histórico fica no navegador (sessão web) e vem junto a cada pergunta.
+// O embed não grava nada no banco: o histórico fica no navegador (sessão web) e vem junto a cada pergunta.
 app.post("/api/present/:id/ask", rateLimit("present-ask", Number(process.env.PRESENT_ASK_PER_MIN) || 20, 60_000), async (req, res) => {
   const nbId = String(req.params.id);
   if (!currentUser(req) && !isPublicNotebook(nbId)) return res.sendStatus(401);
@@ -49,7 +51,7 @@ app.use("/api", (req, res, next) => {
   if (currentUser(req)) return next();
   res.status(401).json({ error: "Sessão expirada. Faça login novamente." });
 });
-const openPages = new Set(["/login.html", "/present.html", "/favicon.svg"]);
+const openPages = new Set(["/login.html", "/embed.html", "/favicon.svg"]);
 app.use((req, res, next) => {
   if (openPages.has(req.path) || currentUser(req)) return next();
   return req.path === "/" || req.path.endsWith(".html") ? res.redirect("/login.html") : res.sendStatus(401);
@@ -88,26 +90,6 @@ function trimConversationQueue(id: string) {
   const removed = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE conversation_id=? AND id NOT IN (SELECT message_id FROM saved_messages) ORDER BY created_at,rowid LIMIT MAX(0,(SELECT count(*) FROM messages WHERE conversation_id=?)-?))").run(id, id, maxMessagesPerConversation).changes as number;
   // O resumo conta mensagens a partir do início; ao sair mensagens antigas, o deslocamento acompanha.
   if (removed) db.prepare("UPDATE conversations SET summary_count=MAX(0,summary_count-?) WHERE id=?").run(removed, id);
-}
-// Resumo rolante: mantém a janela recente fora do resumo e condensa o que sai dela, em lotes (1 chamada a cada ~2 trocas).
-const summarizing = new Set<string>();
-async function updateConversationSummary(id: string) {
-  // O resumo é uma geração extra que disputa a CPU com a próxima pergunta; CONVERSATION_SUMMARY=false desliga.
-  if (process.env.CONVERSATION_SUMMARY === "false" || summarizing.has(id)) return;
-  summarizing.add(id);
-  try {
-    const c = db.prepare("SELECT summary,summary_count FROM conversations WHERE id=?").get(id) as { summary: string; summary_count: number } | undefined;
-    if (!c) return;
-    const total = (db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(id) as { n: number }).n;
-    const pending = total - 4 - c.summary_count;
-    if (pending < 2) return;
-    const take = Math.min(pending, 6);
-    const rows = db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT ? OFFSET ?").all(id, take, c.summary_count) as { role: string; content: string }[];
-    const summary = await summarizeConversation(c.summary, rows);
-    if (summary) db.prepare("UPDATE conversations SET summary=?,summary_count=? WHERE id=? AND summary_count=?").run(summary, c.summary_count + take, id, c.summary_count);
-  } catch (error) {
-    console.warn("Falha ao resumir conversa:", error instanceof Error ? error.message : String(error));
-  } finally { summarizing.delete(id); }
 }
 // Recupera de desligamentos enquanto um arquivo estava sendo indexado.
 db.prepare("UPDATE documents SET status='failed',error='Processamento interrompido; clique em Reprocessar.' WHERE status='processing'").run();
@@ -159,15 +141,15 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
   // Cliente desconectado (botão parar): cancela a geração no provedor.
   const abort=new AbortController();res.on("close",()=>{if(!res.writableFinished)abort.abort()});
   try{
-    // Ollama (modelos locais pequenos): sem mensagens anteriores nem resumo no prompt. Os demais provedores mantêm o histórico.
-    const local=activeProvider("chat")?.kind==="ollama";
     const total=(db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(conversation.id) as {n:number}).n;
-    const history=local?[]:db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(conversation.summary_count,total-6)) as {role:string;content:string}[];
+    // Modelos mini/pequeno (<2,5B): sem mensagens anteriores no prompt. Do 3B em diante, as últimas mensagens resolvem perguntas de acompanhamento.
+    await prepareModel();
+    const history=isCompact(generationProfile().tier)?[]:db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(0,total-6)) as {role:string;content:string}[];
     const createTitle=total===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
-    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,summary:local?"":conversation.summary,detailed:req.body?.detailed===true,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:sources=>send({type:"sources",sources})});
+    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,detailed:req.body?.detailed===true,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:sources=>send({type:"sources",sources})});
     const id=uuid();
     const durationMs=Date.now()-started;
     // Aproximação: cada pedaço de streaming ≈ 1 token; respostas determinísticas (1 pedaço) não têm taxa.
@@ -178,7 +160,6 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     if(stream){send({type:"done",...payload});res.end();}else res.json(payload);
     if(createTitle)void refineConversationTitle(conversation.id,question,result.answer,fallback);
     trimConversationQueue(conversation.id);
-    if(!local)void updateConversationSummary(conversation.id);
   }catch(e){
     if(abort.signal.aborted)return;
     if(stream&&res.headersSent){send({type:"error",error:e instanceof Error?e.message:String(e)});res.end();}else fail(res,e);
@@ -190,7 +171,7 @@ app.get("/api/ai/providers",(_req,res)=>res.json(listProviders()));
 app.post("/api/ai/providers",(req,res)=>{try{res.status(201).json(createProvider(req.body))}catch(e){aiError(res,e)}});
 app.put("/api/ai/providers/:id",(req,res)=>{try{const p=updateProvider(req.params.id,req.body);p?res.json(p):res.sendStatus(404)}catch(e){aiError(res,e)}});
 app.delete("/api/ai/providers/:id",(req,res)=>deleteProvider(req.params.id)?res.json({ok:true}):res.sendStatus(404));
-app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});res.json(listProviders().active)}catch(e){aiError(res,e)}});
+app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void prepareModel();res.json(listProviders().active)}catch(e){aiError(res,e)}});
 app.get("/api/ai/status",(_req,res)=>res.json(activeSummary()));
 app.post("/api/ai/providers/:id/test",async(req,res)=>{const p=getProvider(req.params.id);if(!p)return res.sendStatus(404);res.json(await testProvider(p))});
 // Lista modelos do provedor; sem chave informada, usa a do provedor já cadastrado (providerId).
@@ -203,4 +184,4 @@ app.get("/api/system/info",async(_req,res)=>{
 });
 app.use((err:unknown,_req:express.Request,res:express.Response,_next:express.NextFunction)=>{ if(err instanceof multer.MulterError)return res.status(400).json({error:err.message}); fail(res,err); });
 const port=Number(process.env.PORT)||3000;
-app.listen(port,()=>console.log(`RAG Local disponível em http://localhost:${port}`));
+app.listen(port,()=>{console.log(`RAG Local disponível em http://localhost:${port}`);void prepareModel()});
