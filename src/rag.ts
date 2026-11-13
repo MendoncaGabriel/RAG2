@@ -36,11 +36,16 @@ export async function ensureSavedMessageEmbeddings(notebookId: string) {
   }
 }
 export type HistoryMessage = { role: string; content: string };
-export type AskOptions = { history?: HistoryMessage[]; summary?: string; onToken?: (token: string) => void; onSources?: (sources: any[]) => void; signal?: AbortSignal; detailed?: boolean };
+export type AskOptions = { history?: HistoryMessage[]; onToken?: (token: string) => void; onSources?: (sources: any[]) => void; signal?: AbortSignal; detailed?: boolean };
 
-// Memória da conversa em duas camadas, para gastar poucos tokens:
-//  1) resumo rolante (conversations.summary) com tudo que ficou para trás, mantido em segundo plano pelo servidor;
-//  2) janela curta com as mensagens recentes, onde a última resposta vai quase inteira ("explique melhor" depende dela).
+// Memória da conversa para modelos locais de 1–4B (CPU, prompt curto). O histórico serve a duas coisas, tratadas em separado:
+//  1) BUSCA (todos os tamanhos, inclusive 1B/1.5B): a pergunta de acompanhamento vira autônoma antes de buscar
+//     ("e o patrocinador dele?" → "e o patrocinador dele (PRJ-ARARA)?"), por código sempre que possível: códigos herdados da
+//     pergunta anterior (já resolvida) ou da última resposta, assunto da última pergunta real. O LLM só reescreve do 3B em diante
+//     e só quando não há pista determinística (resolveFollowUp + rewriteQuestion).
+//  2) GERAÇÃO: as mensagens anteriores entram no prompt só do 3B em diante e só em perguntas de acompanhamento. Em mudança de
+//     assunto ficam de fora (menos tokens para preencher e menos distração); recusas anteriores também (induzem nova recusa).
+// Janela curta: a última resposta vai quase inteira ("explique melhor" depende dela), o resto encurtado.
 export function trimHistory(history: HistoryMessage[]): HistoryMessage[] {
   const maxMessages = Math.max(1, Number(process.env.HISTORY_MESSAGES) || 4);
   const maxChars = Math.max(500, Number(process.env.HISTORY_MAX_CHARS) || 2_000);
@@ -54,43 +59,98 @@ export function trimHistory(history: HistoryMessage[]): HistoryMessage[] {
     kept.unshift({ role: m.role, content });
     used += content.length;
   }
+  // A conversa no prompt começa por uma pergunta (alguns modelos de chat exigem alternância usuário/assistente).
+  while (kept[0]?.role === "assistant") kept.shift();
   return kept;
 }
 
+// Recusas e avisos do sistema saem junto com a pergunta que os gerou: não ajudam a entender a próxima pergunta
+// e levam modelos pequenos a recusar de novo. Respostas parciais ("não encontrei o prazo, mas…") ficam.
+const systemNotice = /^(O modelo (de embeddings|não retornou)|Este notebook ainda|Ainda estou processando|Não há documentos processados)/;
+const unhelpfulAnswer = (m: HistoryMessage) => m.role === "assistant" && (systemNotice.test(m.content) || (m.content.length < 240 && abstention.test(m.content)));
+export function usefulHistory(history: HistoryMessage[]): HistoryMessage[] {
+  const out: HistoryMessage[] = [];
+  for (const m of history) {
+    if (unhelpfulAnswer(m)) { if (out.at(-1)?.role === "user") out.pop(); continue; }
+    out.push(m);
+  }
+  return out;
+}
+
 const elaborationOnly = /^(?:(?:quero|queria|gostaria|pode|poderia|podes|favor|por|me|de|da|do|em|com|um|uma|o|a|e|ai|maneira|forma|modo|mais|menos|bem|pouco|melhor|detalhad[ao]s?|detalhes?|detalhadamente|conceito|ideia|tema|assunto|t[oó]pico|explic\w*|explique|explicar|continu\w*|aprofund\w*|exempl\w*|amplie|expanda|elabor\w*|resum\w*|simples|simplific\w*|curto|longo|completo|completa|isso|isto|esse|essa|please|more|detail\w*|explain|elaborate|continue|again|can|you|in|of|the|it|this|that|give|tell|longer|shorter|simpler)\s*)+$/;
-const followUpHint = /\b(mais|detalh\w*|explic\w*|explique|continu\w*|aprofund\w*|exempl\w*|resum\w*|repit\w*|reformul\w*|simplific\w*|amplie|expanda|elabor\w*|detail\w*|explain|elaborate|continue|more|simpler|shorter|isso|isto|esse|essa|esses|essas|ele|ela|eles|elas|disso|nisso|dele|dela|aquele|aquela|tambem|ainda|and|it|its|they|them|this|that|those|these|he|she|also)\b/;
+// Referência explícita ao que veio antes. "este/esta" ficam de fora: sem acento, "está" vira "esta".
+const strongReference = /\b(dele|dela|deles|delas|nele|nela|neles|nelas|ele|ela|eles|elas|isso|isto|disso|disto|nisso|nisto|desse|dessa|desses|dessas|deste|desta|destes|destas|nesse|nessa|nesses|nessas|neste|nesta|esse|essa|esses|essas|aquele|aquela|aqueles|aquelas|daquele|daquela|naquele|naquela|referid[oa]s?|mencionad[oa]s?|it|its|they|them|their)\b/;
 const genericScope = new Set(["notebook", "documento", "documentos", "material", "arquivo", "arquivos", "texto", "textos", "fontes", "conteudo", "tudo", "geral", "principais", "principal", "pontos", "visao", "panorama", "sobre", "trata", "document", "documents", "files", "content", "main", "points", "overview", "all", "everything"]);
 const summaryIntent = /\b(resum\w*|sumariz\w*|sintetiz\w*|visao geral|panorama|principais pontos|pontos principais|do que trata|sobre o que|summar\w*|overview|main points|key points|tldr)\b/;
+const bareText = (text: string) => normalizeText(text).replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim();
+// Assunto próprio: código, nome próprio/sigla depois da primeira palavra ou termo entre aspas.
+const hasOwnSubject = (text: string) => extractCodes(text).length > 0 || /\s[A-ZÀ-Ú][\p{L}\p{N}]+|["“][^"”]{3,}["”]/u.test(text.trim());
+const isSetQuery = (intent: QueryIntent) => intent.list || !!intent.aggregate || !!intent.comparator || !!intent.order;
+// elaboration: só pede mais sobre o assunto anterior · reference: aponta para o que veio antes (pronome, "e …", "desse projeto")
+// weak: curta e sem assunto próprio ("qual o prazo?"): pode ser acompanhamento ou não; só o LLM (3B+) decide, sem herança por código.
+function referenceKind(question: string): "elaboration" | "reference" | "weak" | null {
+  const n = bareText(question);
+  if (!n) return null;
+  if (elaborationOnly.test(n)) return "elaboration";
+  if (strongReference.test(n) || /^(e|and|mas|but|entao)\s/.test(normalizeText(question).trim())) return "reference";
+  // "Resuma o documento" é sobre o notebook todo; "o que é…", "como funciona…" e consultas de conjunto ("qual o projeto mais caro?")
+  // trazem o próprio assunto.
+  if (summaryIntent.test(n) || /^(o que|que|como|por que|porque|what|how|why)\s/.test(n) || isSetQuery(analyzeQuery(question))) return null;
+  return stemTokens(n).length <= 3 && !hasOwnSubject(question) ? "weak" : null;
+}
 
-// Reescreve perguntas de acompanhamento ("e o prazo dele?") em perguntas autônomas, só quando necessário.
-async function standaloneQuestion(question: string, history: HistoryMessage[], summary = ""): Promise<string> {
-  const lastUser = [...history].reverse().find(m => m.role === "user")?.content;
-  if (!lastUser) return question;
-  const normalized = normalizeText(question);
-  // Pedidos puros de elaboração ("quero mais detalhado") não têm assunto próprio: reutilizam o assunto da última pergunta real.
-  const bare = (text: string) => normalizeText(text).replace(/[^\p{L}\p{N}\s]/gu, " ").trim();
-  if (elaborationOnly.test(bare(question))) {
-    const topic = history.filter(m => m.role === "user").reverse().find(m => !elaborationOnly.test(bare(m.content)))?.content || lastUser;
-    return `${topic.slice(0, 300)} (${question})`;
+// mode: none (autônoma) · elaboration (assunto anterior + pedido) · codes (códigos herdados) · model (precisa do LLM; query é o plano B).
+// intentText: texto para a interpretação estruturada (filtros, contagens). No plano B por assunto é a própria pergunta, para
+// palavras da pergunta anterior ("média", "maior") não dispararem de novo o cálculo anterior.
+// topic: assunto que segue adiante na conversa · about: assunto anterior, dado ao LLM na reescrita.
+export type FollowUp = { query: string; intentText: string; mode: "none" | "elaboration" | "codes" | "model"; topic: string; about?: string };
+const withCodes = (question: string, codes: string[]) => `${question.trim().replace(/\s*\?+$/, "")} (${codes.join(", ")})?`;
+export function resolveFollowUp(question: string, history: HistoryMessage[]): FollowUp {
+  const kind = referenceKind(question);
+  const lastUser = history.map(m => m.role).lastIndexOf("user");
+  if (!kind || lastUser < 0) return { query: question, intentText: question, mode: "none", topic: question };
+  // A pergunta anterior já resolvida carrega o assunto adiante ("e o status?" depois de "e o patrocinador dele (PRJ-ARARA)?").
+  const prev = resolveFollowUp(history[lastUser].content, history.slice(0, lastUser));
+  const topic = prev.topic.slice(0, 300);
+  if (kind === "elaboration") { const query = `${topic} (${question})`; return { query, intentText: query, mode: "elaboration", topic }; }
+  if (kind === "weak") return { query: question, intentText: question, mode: "model", topic: question, about: topic };
+  const own = extractCodes(question);
+  const carried = extractCodes(prev.query).filter(c => !own.includes(c)).slice(0, 3);
+  const last = history.at(-1);
+  const answerCodes = last?.role === "assistant" && !unhelpfulAnswer(last) ? extractCodes(last.content) : [];
+  // Resposta com 1–2 códigos ("o maior orçamento é do PRJ-ORION") define o referente; listas longas não.
+  const fromAnswer = answerCodes.length <= 2 ? answerCodes.filter(c => !own.includes(c) && !carried.includes(c)) : [];
+  // Consultas de conjunto ("e quantos estão em execução?") virariam busca por registro se ganhassem um código: não herdam.
+  if (!isSetQuery(analyzeQuery(question)) && (carried.length || fromAnswer.length)) {
+    const query = withCodes(question, carried.length ? carried : fromAnswer);
+    // Pergunta anterior e resposta apontam para códigos diferentes: ambíguo, o LLM decide (o plano B fica com a pergunta).
+    return { query, intentText: query, mode: carried.length && fromAnswer.length ? "model" : "codes", topic: query, about: topic };
   }
-  // Perguntas autossuficientes não gastam uma chamada extra ao LLM.
-  const ownTerms = stemTokens(normalized).length;
-  if (!followUpHint.test(normalized) && ownTerms > 4) return question;
-  const recent = (summary ? `Resumo: ${summary}\n` : "") + history.slice(-2).map(m => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content.slice(0, m.role === "user" ? 250 : 400)}`).join("\n");
+  return { query: `${question.trim()} (sobre: ${topic})`, intentText: question, mode: "model", topic, about: topic };
+}
+
+// Reescrita pelo LLM (3B em diante), só quando resolveFollowUp não resolveu por código. A saída é validada: mantém os códigos da
+// pergunta e não inventa códigos que não estão na conversa; se falhar, vale o plano B determinístico.
+async function rewriteQuestion(question: string, history: HistoryMessage[], topic: string): Promise<string | null> {
+  const recent = history.slice(-2).map(m => `${m.role === "user" ? "Usuário" : "Assistente"}: ${m.content.slice(0, m.role === "user" ? 250 : 400)}`).join("\n");
+  const lastUser = [...history].reverse().find(m => m.role === "user")?.content || "";
   try {
     const output = await chat({ temperature: 0, contextSize: chatContext(), maxTokens: 100, messages: [
-      { role: "system", content: "Reescreva a última pergunta do usuário como uma pergunta completa e autônoma, usando a conversa para resolver pronomes e referências (ex.: \"explique mais detalhadamente\" passa a citar o assunto da resposta anterior). Mantenha o idioma. Não responda. Retorne somente a pergunta reescrita." },
+      { role: "system", content: "Reescreva a última pergunta do usuário como uma pergunta completa e autônoma, usando a conversa para resolver pronomes e referências (ex.: \"e o prazo dele?\" passa a citar o item de que se falava). Mantenha o idioma. Não responda. Retorne somente a pergunta reescrita." },
       { role: "user", content: `Conversa:
-${recent}
+${topic && topic !== lastUser ? `Assunto: ${topic}\n` : ""}${recent}
 
 Última pergunta: ${question}` },
     ] });
-    const rewritten = output.split(/\r?\n/)[0].replace(/^["'`\s]+|["'`\s]+$/g, "").trim();
-    if (rewritten.length >= 5 && rewritten.length <= 400) return rewritten;
+    const rewritten = (output.split(/\r?\n/).map(l => l.trim()).find(Boolean) || "").replace(/^(pergunta( reescrita)?|reescrita|rewritten question|question)\s*:\s*/i, "").replace(/^["'`\s]+|["'`\s]+$/g, "").trim();
+    if (rewritten.length < 5 || rewritten.length > 400) return null;
+    const known = new Set(extractCodes([question, topic, ...history.map(m => m.content)].join("\n"))), codes = extractCodes(rewritten);
+    if (extractCodes(question).some(c => !codes.includes(c)) || codes.some(c => !known.has(c))) return null;
+    return rewritten;
   } catch (error) {
     console.warn("Falha ao reescrever pergunta:", error instanceof Error ? error.message : String(error));
+    return null;
   }
-  return `${lastUser.slice(0, 200)} ${question}`;
 }
 
 // Perguntas de resumo não casam com nenhum trecho específico: amostra trechos espalhados por todos os documentos.
@@ -405,7 +465,8 @@ export function buildSystemPrompt(tier: string): string {
 }
 
 export async function ask(notebookId: string, question: string, options: AskOptions = {}) {
-  const history = trimHistory(options.history || []);
+  // Até 8 mensagens para resolver referências; o prompt usa uma janela menor (trimHistory).
+  const history = (options.history || []).slice(-8);
   const t0 = Date.now();
   const chunkCount = db.prepare("SELECT count(*) AS n FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.notebook_id=? AND d.status='processed'").get(notebookId) as { n: number };
   const savedCount = db.prepare("SELECT count(*) AS n FROM saved_messages WHERE notebook_id=?").get(notebookId) as { n: number };
@@ -421,13 +482,20 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   // num_ctx não muda entre os modos (evita recarregar o modelo no Ollama).
   const detailed = !!options.detailed;
   const topK = Math.min(12, Math.max(1, Number(process.env.RETRIEVAL_TOP_K) || profile.topK));
-  const retrievalQuestion = await standaloneQuestion(question, history, options.summary);
+  const compact = isCompact(profile.tier);
+  const followUp = resolveFollowUp(question, history);
+  let retrievalQuestion = followUp.query, intentText = followUp.intentText;
+  if (followUp.mode === "model" && !compact) {
+    const rewritten = await rewriteQuestion(question, history, followUp.about || "");
+    if (rewritten) retrievalQuestion = intentText = rewritten;
+  }
+  if (followUp.mode !== "none") console.info(`[RAG] acompanhamento (${followUp.mode}${followUp.mode === "model" && retrievalQuestion === followUp.query ? ", plano B" : ""}): ${retrievalQuestion.slice(0, 160)}`);
   const normalizedQuestion = normalizeText(retrievalQuestion).trim();
-  const intent = analyzeQuery(retrievalQuestion);
+  const intent = analyzeQuery(intentText);
 
   // Filtros, contagens, somas, médias, ordenações e listagens completas sobre tabelas são resolvidos por código,
   // com todos os registros da tabela: exato, rastreável e sem gastar geração do LLM.
-  const structured = process.env.STRUCTURED_QUERIES === "false" ? null : structuredQuery(notebookId, retrievalQuestion, intent);
+  const structured = process.env.STRUCTURED_QUERIES === "false" ? null : structuredQuery(notebookId, intentText, intent);
   if (structured?.kind === "direct") {
     options.onSources?.(structured.sources);
     options.onToken?.(structured.answer);
@@ -494,13 +562,13 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   // e os registros exatos por código vêm depois de tudo.
   const hint = temporalHint(retrievalQuestion, passages.slice(0, 3).map(p => p.text));
   const context = [...contextParts.reverse(), recordBlock].filter(Boolean).join("\n\n");
-  const compact = isCompact(profile.tier);
   const systemPrompt = buildSystemPrompt(profile.tier);
   // Não há mais "verificação de escopo" com uma segunda chamada SIM/NAO: em modelos de 1–4B ela dava falso NAO com o contexto
   // certo em mãos (a aplicação descartava os trechos e respondia no lugar da IA) e processava o contexto inteiro duas vezes.
   // Quem decide se responde é o próprio modelo, com a regra de recusa do prompt de sistema.
-  // O histórico já foi limitado por orçamento de caracteres (trimHistory).
-  const turns = history.map(m => ({ role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant", content: m.content }));
+  // Mensagens anteriores: só do 3B em diante e só em acompanhamento (a pergunta já chega resolvida; nos demais casos seriam
+  // tokens a mais e distração). Mini/pequeno ficam com o prompt mínimo: a memória deles está na pergunta resolvida.
+  const turns = compact || followUp.mode === "none" ? [] : trimHistory(usefulHistory(history)).map(m => ({ role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant", content: m.content }));
   let firstToken = 0;
   const raw = await chat({
     temperature: profile.temperature, topP: profile.topP, topK: profile.topKSampling, repeatPenalty: profile.repeatPenalty, signal: options.signal,

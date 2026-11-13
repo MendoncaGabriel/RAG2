@@ -4,10 +4,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const arg = (name: string, fallback = "") => { const i = process.argv.indexOf(`--${name}`); return i > 0 ? process.argv[i + 1] : fallback; };
-const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const src = path.resolve(arg("src", path.join(root, "src")));
 const label = arg("label", path.basename(path.dirname(src)));
 const out = arg("out", "");
@@ -24,7 +24,8 @@ const ai = await load("ai.ts");
 const documents = await load("documents.ts");
 const rag = await load("rag.ts");
 
-type Q = { id: string; cat: string; q: string; must?: string[]; mustNot?: string[]; ordered?: string[]; gold?: string[]; abstain?: boolean };
+// prev: perguntas anteriores da mesma conversa, respondidas pelo próprio modelo antes da pergunta medida (memória da conversa).
+type Q = { id: string; cat: string; q: string; prev?: string[]; must?: string[]; mustNot?: string[]; ordered?: string[]; gold?: string[]; abstain?: boolean };
 const questions: Q[] = JSON.parse(fs.readFileSync(path.join(root, "tests/fixtures/bench_questions.json"), "utf8")).filter((q: Q) => !only.length || only.includes(q.id));
 const corpus = fs.readFileSync(path.join(root, "tests/fixtures/Base_RAG_Verdanis.md"), "utf8");
 const norm = (t: string) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
@@ -42,9 +43,11 @@ const chunks = (db.prepare("SELECT count(*) AS n, avg(length(content)) AS avg FR
 console.log(`[${label}] ingestão: ${ingestMs} ms · ${chunks.n} trechos (média ${Math.round(chunks.avg)} chars)`);
 
 async function run(q: Q) {
+  const history: { role: string; content: string }[] = [];
+  for (const p of q.prev || []) { const r = await rag.ask(nb, p, { history: [...history] }); history.push({ role: "user", content: p }, { role: "assistant", content: r.answer }); }
   const t0 = performance.now();
   let tSources = 0, retrieved: any[] = [];
-  const result = await rag.ask(nb, q.q, { onSources: (s: any[]) => { tSources = performance.now(); retrieved = s; } });
+  const result = await rag.ask(nb, q.q, { history, onSources: (s: any[]) => { tSources = performance.now(); retrieved = s; } });
   const t1 = performance.now();
   const answer: string = result.answer, a = norm(answer);
   const finalSources: any[] = result.sources || [];
@@ -119,5 +122,5 @@ console.log(`\n[${label}] acerto ${pct(summary.accuracy)} · P@K ${pct(summary.p
 console.log(`[${label}] tempo médio: busca ${summary.avgRetrievalMs}ms · geração ${summary.avgGenerationMs}ms · total ${summary.avgTotalMs}ms (p95 ${summary.p95TotalMs}ms) · RSS ${summary.rssMB} MB · Ollama ${summary.ollamaLoadedMB ?? "-"} MB`);
 console.log(`[${label}] por categoria: ${JSON.stringify(byCat)} · simultâneas: ${JSON.stringify(concurrent)}`);
 if (out) fs.writeFileSync(out, JSON.stringify({ summary, results }, null, 2));
-fs.rmSync(tmp, { recursive: true, force: true });
+try { db.close(); fs.rmSync(tmp, { recursive: true, force: true }); } catch {} // Windows: o SQLite aberto impede apagar a pasta
 process.exit(0);

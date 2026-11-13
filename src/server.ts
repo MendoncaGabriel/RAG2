@@ -5,9 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, ensureSavedMessageEmbeddings, generationProfile, invalidateIndex, prepareModel, uuid } from "./rag.js";
+import { ask, chatContext, ensureSavedMessageEmbeddings, invalidateIndex, prepareModel, uuid } from "./rag.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
-import { isCompact } from "./modelprofile.js";
 import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
 import { backfillRecords, fixMojibake, processDocument, reindexDocument, removeDocument } from "./documents.js";
 
@@ -87,9 +86,7 @@ Resposta: ${answer.slice(0, 1200)}` },
 // Mensagens salvas pelo usuário são preservadas (apagá-las removeria o item salvo).
 const maxMessagesPerConversation = Math.max(10, Number(process.env.MAX_MESSAGES_PER_CONVERSATION) || 40);
 function trimConversationQueue(id: string) {
-  const removed = db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE conversation_id=? AND id NOT IN (SELECT message_id FROM saved_messages) ORDER BY created_at,rowid LIMIT MAX(0,(SELECT count(*) FROM messages WHERE conversation_id=?)-?))").run(id, id, maxMessagesPerConversation).changes as number;
-  // O resumo conta mensagens a partir do início; ao sair mensagens antigas, o deslocamento acompanha.
-  if (removed) db.prepare("UPDATE conversations SET summary_count=MAX(0,summary_count-?) WHERE id=?").run(removed, id);
+  db.prepare("DELETE FROM messages WHERE id IN (SELECT id FROM messages WHERE conversation_id=? AND id NOT IN (SELECT message_id FROM saved_messages) ORDER BY created_at,rowid LIMIT MAX(0,(SELECT count(*) FROM messages WHERE conversation_id=?)-?))").run(id, id, maxMessagesPerConversation);
 }
 // Recupera de desligamentos enquanto um arquivo estava sendo indexado.
 db.prepare("UPDATE documents SET status='failed',error='Processamento interrompido; clique em Reprocessar.' WHERE status='processing'").run();
@@ -132,7 +129,7 @@ app.patch("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const tit
 app.delete("/api/notebooks/:notebookId/saved-messages/:id",(req,res)=>{ const result=db.prepare("DELETE FROM saved_messages WHERE id=? AND notebook_id=?").run(req.params.id,req.params.notebookId); invalidateIndex(req.params.notebookId); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 app.get("/api/conversations/:id/messages",(req,res)=>res.json(db.prepare("SELECT * FROM messages WHERE conversation_id=? ORDER BY created_at").all(req.params.id)));
 app.post("/api/conversations/:id/messages",async(req,res)=>{
-  const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string;summary:string;summary_count:number}|undefined;
+  const conversation=db.prepare("SELECT * FROM conversations WHERE id=?").get(req.params.id) as {id:string;notebook_id:string;title:string}|undefined;
   if(!conversation)return res.sendStatus(404);
   const question=String(req.body?.content||"").trim();
   if(!question||question.length>5000)return res.status(400).json({error:"Pergunta obrigatória (máximo de 5000 caracteres)."});
@@ -142,9 +139,9 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
   const abort=new AbortController();res.on("close",()=>{if(!res.writableFinished)abort.abort()});
   try{
     const total=(db.prepare("SELECT count(*) AS n FROM messages WHERE conversation_id=?").get(conversation.id) as {n:number}).n;
-    // Modelos mini/pequeno (<2,5B): sem mensagens anteriores no prompt. Do 3B em diante, as últimas mensagens resolvem perguntas de acompanhamento.
-    await prepareModel();
-    const history=isCompact(generationProfile().tier)?[]:db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 6 OFFSET ?").all(conversation.id,Math.max(0,total-6)) as {role:string;content:string}[];
+    // Últimas mensagens para todos os modelos: ask resolve perguntas de acompanhamento com elas (também no 1B/1.5B)
+    // e decide pelo perfil se entram no prompt.
+    const history=db.prepare("SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at,rowid LIMIT 8 OFFSET ?").all(conversation.id,Math.max(0,total-8)) as {role:string;content:string}[];
     const createTitle=total===0&&conversation.title==="Nova conversa",fallback=createTitle?fallbackConversationTitle(question):"";
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
