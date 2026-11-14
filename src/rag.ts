@@ -456,7 +456,8 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   }
   await prepareModel();
   const profile = modelProfile(activeProvider("chat"));
-  // Modo detalhado (botão ao lado de Enviar): mesmo contexto do rápido (o início da resposta não atrasa), só a saída é maior.
+  // Modo detalhado (botão ao lado de Enviar): mesmo contexto do rápido (o início da resposta não atrasa); muda o teto de saída
+  // e a preferência de estilo (mais elaborada), sem impor tamanho.
   // num_ctx não muda entre os modos (evita recarregar o modelo no Ollama).
   const detailed = !!options.detailed;
   const topK = Math.min(12, Math.max(1, Number(process.env.RETRIEVAL_TOP_K) || profile.topK));
@@ -566,6 +567,13 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   // Mensagens anteriores: só do 3B em diante e só em acompanhamento (a pergunta já chega resolvida; nos demais casos seriam
   // tokens a mais e distração). Mini/pequeno ficam com o prompt mínimo: a memória deles está na pergunta resolvida.
   const turns = compact || followUp.mode === "none" ? [] : trimHistory(usefulHistory(history)).map(m => ({ role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant", content: m.content }));
+  // Estilo por modo: só uma preferência, não regra de tamanho. O teto de tokens (maxTokens) é o único limite;
+  // dentro dele o modelo decide o quanto escrever conforme a pergunta.
+  const style = detailed
+    ? "Prefira uma resposta elaborada: explique como funciona e dê exemplos do contexto quando houver. Se a pergunta for simples, não precisa alongar."
+    : compact
+      ? "Prefira uma resposta curta e direta, mas inclua o necessário para responder bem."
+      : "Prefira uma resposta direta e objetiva, cobrindo todas as partes da pergunta; detalhe mais se a pergunta pedir. Use uma lista curta quando houver vários itens.";
   let firstToken = 0;
   const raw = await chat({
     ...samplingFor(profile, !!options.creative), repeatPenalty: profile.repeatPenalty, signal: options.signal,
@@ -577,7 +585,7 @@ export async function ask(notebookId: string, question: string, options: AskOpti
 ${context}
 </contexto>
 
-Pergunta: ${retrievalQuestion}${hint ? `\n\n${hint}` : ""}${"\n\nResponda usando o contexto acima."}${detailed ? "\n\nResponda de forma longa e detalhada, em vários parágrafos: defina, explique como funciona e dê exemplos do contexto." : compact ? "\n\nResponda em no máximo 3 frases curtas." : "\n\nResponda de forma direta e completa, cobrindo todas as partes da pergunta; use uma lista curta quando houver vários itens."}` },
+Pergunta: ${retrievalQuestion}${hint ? `\n\n${hint}` : ""}\n\nResponda usando o contexto acima.\n\n${style}` },
     ],
   }, token => { if (!firstToken) firstToken = Date.now(); options.onToken?.(token); });
   console.info(`[RAG] perfil ${profile.tier} (${activeProvider("chat")?.chatModel} · ${profile.family} ${Number(profile.sizeB.toFixed(1))}B/${profile.sizeSource} · ctx ${profile.contextTokens} · topK ${rerankInfo ? `${scored.length} de ${rerankInfo.candidates} (rerank ${rerankInfo.ms}ms)` : effectiveTopK}) · busca ${t1 - t0}ms · 1º token ${firstToken ? firstToken - t1 : "-"}ms · geração ${Date.now() - t1}ms · contexto ${context.length} chars`);
