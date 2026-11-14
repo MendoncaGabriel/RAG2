@@ -1,6 +1,7 @@
 // Tela de Configurações de IA: cadastro de servidores Ollama para chat e embeddings, e escolha da IA em uso. Depende de $, api, esc, showError e confirmModal (app.js).
 const PRESETS = [
-  { label: 'Ollama (local)', name: 'Ollama', kind: 'ollama', baseUrl: 'http://localhost:11434', chatModel: 'qwen2.5:3b', embeddingModel: 'bge-m3' },
+  // baseUrl vazio: usa a do servidor (/api/ai/kinds = OLLAMA_BASE_URL). No Docker, localhost seria o próprio container.
+  { label: 'Ollama (Windows)', name: 'Ollama', kind: 'ollama', baseUrl: '', chatModel: 'qwen2.5:3b', embeddingModel: 'bge-m3' },
 ];
 const SLOTS = {
   chat: { field: 'chatModel', list: '#listChat', select: '#activeChat', saved: '#savedChat', noun: 'IA de chat', badge: 'bg-jabil text-white' },
@@ -110,7 +111,7 @@ function openProviderDialog(provider, slot) {
 $('#pfCancel').onclick = () => $('#providerDialog').close();
 $('#providerDialog').addEventListener('click', e => { if (e.target === $('#providerDialog')) $('#providerDialog').close(); });
 // Cadastro novo guarda só o modelo da seção em que foi aberto; o outro campo fica vazio.
-$('#pfPreset').onchange = e => { const p = PRESETS[e.target.value]; if (p) { fillForm(editingSlot === 'chat' ? { ...p, embeddingModel: '' } : { ...p, chatModel: '' }); form.key.focus(); } };
+$('#pfPreset').onchange = e => { const p = PRESETS[e.target.value]; if (p) { const base = { ...p, baseUrl: p.baseUrl || kinds.ollama?.baseUrl || '' }; fillForm(editingSlot === 'chat' ? { ...base, embeddingModel: '' } : { ...base, chatModel: '' }); form.key.focus(); } };
 $('#pfKeyToggle').onclick = () => { const show = form.key.type === 'password'; form.key.type = show ? 'text' : 'password'; $('#pfKeyToggle').textContent = show ? 'Ocultar' : 'Ver'; };
 
 $('#pfFetch').onclick = async () => {

@@ -9,7 +9,8 @@ import { tunedThreads } from "./tuning.js";
 // um para chat e outro para embeddings. Nada aqui depende de variáveis de ambiente.
 export type ProviderKind = "ollama";
 export const providerKinds: Record<ProviderKind, { label: string; baseUrl: string }> = {
-  ollama: { label: "Ollama", baseUrl: "http://localhost:11434" },
+  // No container, localhost é o próprio container: provedor novo nasce com o OLLAMA_BASE_URL (IP do Windows visto pelo WSL2).
+  ollama: { label: "Ollama", get baseUrl() { return config.ollama.baseUrl || "http://localhost:11434"; } },
 };
 
 export interface Provider { id: string; name: string; kind: ProviderKind; baseUrl: string; apiKey: string; chatModel: string; embeddingModel: string }
