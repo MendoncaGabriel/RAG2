@@ -84,13 +84,17 @@ let sending=false;
 let detailMode=false;try{detailMode=localStorage.getItem('detailMode')==='1'}catch{}
 const paintDetail=()=>{$('#detailToggle').setAttribute('aria-checked',String(detailMode));$('#detailTrack').style.background=detailMode?'rgb(var(--c-jabil))':'rgb(var(--c-ink-soft))';$('#detailKnob').style.transform=detailMode?'translateX(1rem)':'';$('#detailLabel').textContent=detailMode?'Detalhado':'Rápido'};
 $('#detailToggle').onclick=()=>{detailMode=!detailMode;try{localStorage.setItem('detailMode',detailMode?'1':'0')}catch{}paintDetail()};paintDetail();
+// Rígido (padrão) / Flexível: só muda a amostragem do modelo (temperatura etc.), não liga o "thinking" do Ollama.
+let creativeMode=false;try{creativeMode=localStorage.getItem('creativeMode')==='1'}catch{}
+const paintCreative=()=>{$('#creativeToggle').setAttribute('aria-checked',String(creativeMode));$('#creativeTrack').style.background=creativeMode?'rgb(var(--c-jabil))':'rgb(var(--c-ink-soft))';$('#creativeKnob').style.transform=creativeMode?'translateX(1rem)':'';$('#creativeLabel').textContent=creativeMode?'Flexível':'Rígido'};
+$('#creativeToggle').onclick=()=>{creativeMode=!creativeMode;try{localStorage.setItem('creativeMode',creativeMode?'1':'0')}catch{}paintCreative()};paintCreative();
 // Caixa de pergunta cresce com o texto; Enter envia (Shift+Enter quebra linha). Em telas de toque o Enter só quebra linha.
 const question=$('#question'),autosize=()=>{question.style.height='auto';question.style.height=Math.min(question.scrollHeight,160)+'px'};question.addEventListener('input',autosize);
 question.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing&&matchMedia('(pointer:fine)').matches){e.preventDefault();if(question.value.trim())$('#askForm').requestSubmit()}});
 const thinkingHtml='<article id="thinking" class="msg msg-bot"><div class="msg-head"><span class="msg-role">Bento</span></div><div class="flex items-center gap-2 text-sm text-ink-muted" role="status" aria-label="O Bento está pensando"><span class="flex gap-1"><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-jabil-light"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-jabil-light [animation-delay:150ms]"></span><span class="h-1.5 w-1.5 animate-bounce rounded-full bg-jabil-light [animation-delay:300ms]"></span></span><span id="thinkingText">Buscando nos documentos…</span></div></article>';
 $('#askForm').onsubmit=async e=>{e.preventDefault();const input=question,content=input.value.trim();if(!content||sending)return;sending=true;const chatId=conversation,submit=$('#send'),ctrl=new AbortController(),sendHtml=submit.innerHTML,sendClass=submit.className;submit.type='button';submit.className=sendClass.replace('btn-primary','btn-danger');submit.innerHTML='<i data-lucide="square" class="h-4 w-4"></i><span>Parar</span>';submit.onclick=()=>ctrl.abort();input.value='';autosize();$('#messages .chat-empty')?.remove();$('#messages').insertAdjacentHTML('beforeend',renderMessage({role:'user',content})+thinkingHtml);icons();scrollChat();
 try{
-const res=await fetch(`/api/conversations/${chatId}/messages?stream=1`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content,detailed:detailMode}),signal:ctrl.signal});
+const res=await fetch(`/api/conversations/${chatId}/messages?stream=1`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content,detailed:detailMode,creative:creativeMode}),signal:ctrl.signal});
 if(!res.ok){const d=await res.json().catch(()=>({}));throw Error(d.error||`Erro ${res.status}`)}
 const bubble=$('#thinking'),userBubble=bubble.previousElementSibling,reader=res.body.getReader(),dec=new TextDecoder();
 let buf='',text='',final=null,queued=false;

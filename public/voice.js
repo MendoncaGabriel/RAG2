@@ -307,7 +307,7 @@
   async function ask(content, t) {
     setState('thinking'); showUser(content); $q('#vAnswer').innerHTML = '';
     try {
-      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode }), signal: t.ctrl.signal });
+      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode }), signal: t.ctrl.signal });
       if (res.status === 401) return location.replace('/login.html');
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw Error(d.error || `Erro ${res.status}`) }
       used = true;

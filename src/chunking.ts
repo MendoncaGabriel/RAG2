@@ -30,6 +30,60 @@ export function splitProse(text: string, size = chunkSize(), overlap = chunkOver
   return out;
 }
 
+// ---------- Limpeza de PDF (por página) ----------
+// Cabeçalhos/rodapés repetidos ("Initial release: …", "CONFIDENTIAL … Page 5 of 24"), linhas de sumário ("2.1 Forno ……… 5")
+// e números de página poluem embeddings, BM25 e o contexto do modelo: capas e sumários passavam à frente do conteúdo.
+// Só as bordas de cada página são consideradas para cabeçalho/rodapé ("Resolution:" repetido no corpo é conteúdo).
+const tocLine = /(\.{5,}|…{2,}|(?:\. ){4,}\.?|_{5,})\s*\d{1,4}\s*$/;
+const pageNumberLine = /^(?:p[aá]g(?:ina)?\.?|page)?\s*:?\s*\d{1,4}(?:\s*(?:of|de|\/)\s*\d{1,4})?$/i;
+const lineKey = (line: string) => line.trim().toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ");
+// Título numerado de PDF ("5.2 Oven Monitoring", "3.1 BACKEND FAILS TO START", "7.6 ERROR: \"…\"") vira título Markdown,
+// para o trecho carregar a seção. Passos numerados ("1. Clone the repository") ficam: título exige palavras capitalizadas.
+function numberedHeading(line: string): string | null {
+  const m = line.trim().match(/^(\d{1,2}(?:\.\d{1,2}){0,3})\.?\s+(\S.{1,90})$/);
+  if (!m || Number(m[1].split(".")[0]) > 30) return null;
+  const title = m[2].trim();
+  if (!/^["“(]?[A-ZÀ-Ý]/.test(title) || /[.,;:]$/.test(title)) return null;
+  const words = title.split(/\s+/);
+  if (words.length > 12) return null;
+  const significant = words.map(w => w.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "")).filter(w => w.length >= 4);
+  if (significant.some(w => !/^\p{Lu}/u.test(w))) return null;
+  return `${"#".repeat(Math.min(6, m[1].split(".").length))} ${m[1]} ${title}`;
+}
+export function cleanPdfPages(pages: string[]): string {
+  const split = pages.map(p => p.replace(/\r/g, "").split("\n"));
+  // Bordas: 6 primeiras e 4 últimas linhas não vazias de cada página.
+  const edges = split.map(lines => {
+    const filled = lines.map((l, i) => (l.trim() ? i : -1)).filter(i => i >= 0);
+    return new Set([...filled.slice(0, 6), ...filled.slice(-4)]);
+  });
+  // Cabeçalho/rodapé: repete na borda de muitas páginas e quase nunca aparece no miolo (rótulos como "Resolution:" aparecem).
+  const seen = new Map<string, number>(), inner = new Map<string, number>();
+  split.forEach((lines, p) => {
+    for (const k of new Set([...edges[p]].map(i => lineKey(lines[i])))) seen.set(k, (seen.get(k) || 0) + 1);
+    lines.forEach((l, i) => { if (l.trim() && !edges[p].has(i)) { const k = lineKey(l); inner.set(k, (inner.get(k) || 0) + 1); } });
+  });
+  const minPages = Math.max(3, Math.ceil(pages.length * 0.4));
+  const repeated = pages.length >= 3 ? new Set([...seen].filter(([k, n]) => n >= minPages && k.length <= 150 && (inner.get(k) || 0) <= n * 0.25).map(([k]) => k)) : new Set<string>();
+  return split.map((lines, p) => lines.flatMap((line, i) => {
+    const t = line.trim();
+    if (!t) return [line];
+    if (edges[p].has(i) && (repeated.has(lineKey(line)) || pageNumberLine.test(t))) return [];
+    if (tocLine.test(t)) return [];
+    const heading = numberedHeading(t);
+    if (heading) return [heading];
+    // "#" no PDF é comentário de código (.env, shell), não título Markdown.
+    return [/^#/.test(t) ? ` ${line}` : line];
+  }).join("\n")).join("\n\n");
+}
+
+// Sumário (linhas com pontilhado até o número da página): não responde nada e, por concentrar palavras-chave, vencia a busca.
+export const isTocChunk = (text: string) => {
+  const lines = text.split("\n").filter(l => l.trim() && !/^\[Seção:/.test(l));
+  const toc = lines.filter(l => /\.{6,}|…{3,}/.test(l)).length;
+  return toc >= 2 && toc >= lines.length * 0.3;
+};
+
 type Block = { kind: "heading" | "table" | "list" | "text"; lines: string[]; level?: number };
 const headingRe = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 const isTableLine = (l: string) => /^\s*\|.*\|\s*$/.test(l);

@@ -26,7 +26,7 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 ## Estrutura
 
 - [src/server.ts](src/server.ts): rotas da API, upload (multer), autenticação, chat incorporável via iframe (`/api/present/:id/ask`, NDJSON em streaming).
-- [src/chunking.ts](src/chunking.ts): chunking estrutural (seções no prefixo `[Seção: …]`, tabelas por grupos de linhas com cabeçalho repetido, listas inteiras).
+- [src/chunking.ts](src/chunking.ts): chunking estrutural (seções no prefixo `[Seção: …]`, tabelas por grupos de linhas com cabeçalho repetido, listas inteiras). `cleanPdfPages` limpa o texto do PDF por página (cabeçalho/rodapé repetido nas bordas e ausente do miolo, números de página, sumário com pontilhado; títulos numerados viram `#`); `isTocChunk` marca trechos de sumário, que a busca ignora. Testes em `tests/pdfclean.test.mts`.
 - [src/structured.ts](src/structured.ts): registros de tabelas/fichas (`records`), interpretação da pergunta (`analyzeQuery`) e respostas determinísticas (filtros, contagem, soma, média, ordenação, listagem completa) e registros exatos por código.
 - [src/rag.ts](src/rag.ts): busca híbrida (semântica + BM25-like com RRF), construção do prompt por perfil e `ask`.
 - [src/modelprofile.ts](src/modelprofile.ts): reconhecimento do modelo (tamanho, família, contexto, raciocínio) e perfil de geração e recuperação derivado dele; prefixos de embeddings.
@@ -44,7 +44,7 @@ Valide com `npm run typecheck` e `npm test`. O benchmark usa `tests/fixtures/Bas
 - Código denso, comentários em português, mensagens ao usuário em português. Siga o estilo existente (arrow functions, declarações compactas).
 - Imports internos usam extensão `.js` (ESM com `tsc`).
 - Configuração via variáveis de ambiente listadas em [.env.example](.env.example) e documentadas no [README.md](README.md); mantenha os três (código, `.env.example`, `docker-compose.yml`) sincronizados ao adicionar variáveis.
-- `documents.chunk_version` marca o chunking usado (1 = estrutural); documentos antigos continuam funcionando e são atualizados com "Reprocessar". `backfillRecords` extrai registros dos documentos antigos na inicialização sem recalcular embeddings.
+- `documents.chunk_version` marca o chunking usado (1 = estrutural; 2 = PDF limpo e nome do documento no texto do embedding, `embeddingInput`, usado também em "Reindexar"); documentos antigos continuam funcionando e são atualizados com "Reprocessar". `backfillRecords` extrai registros dos documentos antigos na inicialização sem recalcular embeddings.
 - Trocar o modelo de embeddings exige reindexar; a busca retorna `incompatible` se os vetores divergirem.
 - O Ollama recarrega o modelo quando `num_ctx` muda entre chamadas: todas as chamadas de chat usam `chatContext()` para o mesmo valor.
 

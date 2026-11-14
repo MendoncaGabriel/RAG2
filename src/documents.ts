@@ -10,7 +10,7 @@ import { createWorker, PSM } from "tesseract.js";
 import sharp from "sharp";
 import { db, uploadDir } from "./database.js";
 import { embedMany, normalizeText } from "./rag.js";
-import { chunkStructured } from "./chunking.js";
+import { chunkStructured, cleanPdfPages } from "./chunking.js";
 import { csvToMarkdown, rowsToMarkdown, saveRecords } from "./structured.js";
 
 export function fixMojibake(value: string): string {
@@ -26,7 +26,16 @@ export function fixMojibake(value: string): string {
 export async function extractText(filePath: string, name: string, onProgress?: (progress: number) => void): Promise<string> {
   const ext = path.extname(name).toLowerCase();
   if (ext === ".pdf") {
-    const text = (await pdf(await fs.readFile(filePath))).text;
+    // Mesma montagem de texto do pdf-parse, guardando cada página para limpar cabeçalhos, rodapés e sumário (cleanPdfPages).
+    const pages: string[] = [];
+    const pagerender = (pageData: any) => pageData.getTextContent({ normalizeWhitespace: false, disableCombineTextItems: false }).then((content: any) => {
+      let lastY: unknown, text = "";
+      for (const item of content.items) { text += lastY == item.transform[5] || !lastY ? item.str : `\n${item.str}`; lastY = item.transform[5]; }
+      pages.push(text);
+      return text;
+    });
+    await pdf(await fs.readFile(filePath), { pagerender });
+    const text = cleanPdfPages(pages);
     if (text.trim()) return text;
     throw new Error("Este PDF parece ser digitalizado. OCR de PDF ainda requer conversão externa; envie as páginas como imagens.");
   }
@@ -141,9 +150,17 @@ async function embedChunks(allTexts: string[], id: string, aliveSql: string, ali
   return allTexts.map(t => byText.get(t)!);
 }
 
-// Versão do chunking: 1 = estrutural (seções, tabelas com cabeçalho, listas). Documentos antigos seguem funcionando
-// com os trechos que já têm; "Reprocessar" os atualiza.
-export const CHUNK_VERSION = 1;
+// Versão do chunking: 1 = estrutural (seções, tabelas com cabeçalho, listas); 2 = PDF limpo (sem cabeçalho/rodapé repetido
+// nem sumário, títulos numerados viram seções) e nome do documento no texto do embedding. Documentos antigos seguem
+// funcionando com os trechos que já têm; "Reprocessar" os atualiza.
+export const CHUNK_VERSION = 2;
+
+// O vetor do trecho leva o nome do documento ("Hefesto - Technical Manual"): o trecho solto ganha o assunto do documento e
+// perguntas que citam o sistema ou o tipo de documento acham o trecho certo. O conteúdo salvo e enviado ao modelo não muda.
+export const embeddingInput = (name: string, content: string) => {
+  const title = name.replace(/\.[a-z0-9]{1,5}$/i, "").replace(/_+/g, " ").trim();
+  return title ? `Documento: ${title}\n${content}` : content;
+};
 
 // Migração sem reindexar: documentos antigos ganham registros estruturados (tabelas/fichas) reextraindo o texto do
 // arquivo original, sem recalcular embeddings. Imagens (OCR) ficam de fora por serem caras; roda em segundo plano.
@@ -201,7 +218,7 @@ async function processDocumentNow(id: string, notebookId: string, filePath: stri
     const pieces = chunkStructured(content), chunks = pieces.map(p => p.content);
     if (!chunks.length) throw new Error("Nenhum texto foi extraído do documento.");
     db.prepare("UPDATE documents SET progress=?,chunks_done=0,chunks_total=? WHERE id=?").run(base, chunks.length, id);
-    const embedded = await embedChunks(chunks, id, "SELECT 1 FROM documents WHERE id=? AND notebook_id=?", [id, notebookId], base);
+    const embedded = await embedChunks(chunks.map(c => embeddingInput(name, c)), id, "SELECT 1 FROM documents WHERE id=? AND notebook_id=?", [id, notebookId], base);
     if (!embedded) return;
     const vectors = embedded.map(v => Buffer.from(new Float32Array(v).buffer)), dims = embedded[0].length;
     const insert = db.prepare("INSERT INTO chunks(id,document_id,notebook_id,content,embedding,dimensions,chunk_index,search_text,section) VALUES(?,?,?,?,?,?,?,?,?)");
@@ -230,9 +247,10 @@ async function processDocumentNow(id: string, notebookId: string, filePath: stri
 export async function reindexDocument(id: string) {
   const chunks = db.prepare("SELECT id,content FROM chunks WHERE document_id=? ORDER BY chunk_index").all(id) as { id: string; content: string }[];
   if (!chunks.length) return;
+  const name = (db.prepare("SELECT name FROM documents WHERE id=?").get(id) as { name: string } | undefined)?.name ?? "";
   db.prepare("UPDATE documents SET status='processing',progress=0,chunks_done=0,chunks_total=?,error=NULL WHERE id=?").run(chunks.length, id);
   try {
-    const embedded = await embedChunks(chunks.map(c => c.content), id, "SELECT 1 FROM documents WHERE id=?", [id], 0);
+    const embedded = await embedChunks(chunks.map(c => embeddingInput(name, c.content)), id, "SELECT 1 FROM documents WHERE id=?", [id], 0);
     if (!embedded) return;
     const vectors = embedded.map((v, k) => ({ id: chunks[k].id, blob: Buffer.from(new Float32Array(v).buffer), dims: v.length }));
     if (new Set(vectors.map(v => v.dims)).size !== 1) throw new Error("Dimensão de embedding inconsistente.");
