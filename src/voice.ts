@@ -6,10 +6,10 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { once } from "node:events";
-import { db } from "./database.js";
+import { dataDir, db } from "./database.js";
 import { extractCodes } from "./structured.js";
 
-export const voiceDir = path.resolve(process.env.VOICE_DIR || "./data/voice");
+export const voiceDir = path.resolve(process.env.VOICE_DIR || path.join(dataDir, "voice"));
 const enabled = process.env.VOICE_ENABLED !== "false";
 const hfUrl = (process.env.VOICE_HF_URL || "https://huggingface.co").replace(/\/+$/, "");
 const threads = Math.max(1, Number(process.env.VOICE_NUM_THREADS) || 4);

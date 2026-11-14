@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
+import { config } from "./config.js";
 import { db } from "./database.js";
+import { networkCause } from "./qdrant.js";
 import { deriveProfile, embeddingPrefix, isReasoningOnly, sizeFromDetails, type ModelInfo } from "./modelprofile.js";
 import { tunedThreads } from "./tuning.js";
 
@@ -87,17 +89,60 @@ export function activeSummary() {
   return { chat: one("chat"), embedding: one("embedding") };
 }
 
-// Primeira inicialização (sem nenhum provedor): cadastra e ativa o Ollama indicado por OLLAMA_BASE_URL (ex.: o serviço do docker compose).
-const seedBase = (process.env.OLLAMA_BASE_URL || "").trim();
-if (seedBase && !(db.prepare("SELECT COUNT(*) AS n FROM ai_providers").get() as { n: number }).n) {
-  const p = createProvider({ name: "Ollama (local)", kind: "ollama", baseUrl: seedBase, chatModel: process.env.OLLAMA_CHAT_MODEL || "qwen2.5:3b", embeddingModel: process.env.OLLAMA_EMBEDDING_MODEL || "bge-m3" });
-  setActive({ chat: p.id, embedding: p.id });
+// O Ollama do ambiente (OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_EMBEDDING_MODEL: o Ollama do Windows 11) é sincronizado a cada
+// inicialização num provedor fixo e ocupa os slots que estiverem vazios. Outros servidores podem ser cadastrados em Configurações.
+export const ENV_PROVIDER_ID = "env-ollama";
+{
+  const o = config.ollama;
+  if (o.baseUrl && (o.llmModel || o.embeddingModel)) {
+    const data = normalize({ name: "Ollama (Windows)", kind: "ollama", baseUrl: o.baseUrl, apiKey: o.apiKey, clearKey: !o.apiKey, chatModel: o.llmModel, embeddingModel: o.embeddingModel });
+    db.prepare("INSERT INTO ai_providers(id,name,kind,base_url,api_key,chat_model,embedding_model) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,base_url=excluded.base_url,api_key=excluded.api_key,chat_model=excluded.chat_model,embedding_model=excluded.embedding_model")
+      .run(ENV_PROVIDER_ID, data.name, data.kind, data.baseUrl, data.apiKey, data.chatModel, data.embeddingModel);
+    if (!activeProvider("chat") && data.chatModel) setActive({ chat: ENV_PROVIDER_ID });
+    if (!activeProvider("embedding") && data.embeddingModel) setActive({ embedding: ENV_PROVIDER_ID });
+  }
 }
 
 // ---------- HTTP ----------
+const bridgeHint = "Confira se o Ollama está aberto no Windows e se a ponte WSL2 está ativa (scripts/windows/ollama-wsl-bridge.ps1; o IP do Windows muda se o WSL trocar de sub-rede).";
 async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number; signal?: AbortSignal }) {
-  const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(init.timeout ?? 180_000)]) : AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${e?.cause?.code || e?.message || e}).`); });
+  const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(init.timeout ?? 180_000)]) : AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { if (init.signal?.aborted) throw e; throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${networkCause(e)}). ${bridgeHint}`); });
   return res;
+}
+
+// ---------- Verificação do servidor e dos modelos (antes de qualquer inferência) ----------
+// Lista de modelos instalados por servidor, em cache curto. Modelo ausente vira mensagem clara; nada é baixado automaticamente.
+const tagsCache = new Map<string, { at: number; models?: Set<string>; error?: string }>();
+const withTag = (m: string) => (m.includes(":") ? m : `${m}:latest`);
+async function installedModels(p: Provider, force = false): Promise<Set<string>> {
+  const hit = tagsCache.get(p.baseUrl);
+  if (!force && hit && Date.now() - hit.at < (hit.models ? 60_000 : 5_000)) { if (hit.models) return hit.models; throw new Error(hit.error); }
+  try {
+    const data = await jsonOrThrow("Ollama", await http("Ollama", `${p.baseUrl}/api/tags`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 8_000 }));
+    const models = new Set<string>(((data.models || []) as any[]).map(m => withTag(String(m.name))));
+    tagsCache.set(p.baseUrl, { at: Date.now(), models });
+    return models;
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    tagsCache.set(p.baseUrl, { at: Date.now(), error });
+    throw new Error(error);
+  }
+}
+export async function ensureModel(p: Provider, model: string) {
+  if ((await installedModels(p)).has(withTag(model))) return;
+  if ((await installedModels(p, true)).has(withTag(model))) return;
+  throw new Error(`O modelo "${model}" não está disponível no Ollama em ${p.baseUrl}. No Windows, execute "ollama pull ${model}" ou escolha outro modelo.`);
+}
+// Estado do Ollama do ambiente e dos modelos configurados (health check e inicialização).
+export async function ollamaStatus(): Promise<{ ok: boolean; baseUrl?: string; models?: string[]; error?: string }> {
+  const p = activeProvider("chat") ?? activeProvider("embedding");
+  if (!p) return { ok: false, error: "Nenhum servidor Ollama configurado." };
+  try {
+    const models = await installedModels(p, true);
+    const need = [activeProvider("chat")?.chatModel, activeProvider("embedding")?.embeddingModel].filter((m): m is string => !!m);
+    const missing = need.filter(m => !models.has(withTag(m)));
+    return { ok: !missing.length, baseUrl: p.baseUrl, models: need, ...(missing.length ? { error: `Modelos ausentes no Ollama: ${missing.join(", ")} (no Windows: ollama pull <modelo>).` } : {}) };
+  } catch (e) { return { ok: false, baseUrl: p.baseUrl, error: e instanceof Error ? e.message : String(e) }; }
 }
 // Erro HTTP legível; modelo ausente vira instrução de como baixar ou trocar.
 async function httpError(label: string, res: Response, model?: string) {
@@ -163,6 +208,7 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
   const reasoningOnly = isReasoningOnly(p.chatModel);
   const maxTokens = (opts.maxTokens ?? 512) + (reasoningOnly ? 2048 : 0);
   const label = providerKinds[p.kind].label;
+  await ensureModel(p, p.chatModel);
   const res = await http(label, `${p.baseUrl}/api/chat`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 600_000, signal: opts.signal, json: {
     model: p.chatModel, stream: true, ...(reasoningOnly ? {} : { think: false }), keep_alive: "30m", ...(opts.json ? { format: "json" } : {}),
     options: { temperature: opts.temperature ?? 0.1, top_p: opts.topP ?? 0.8, ...(opts.topK ? { top_k: opts.topK } : {}), repeat_penalty: opts.repeatPenalty ?? 1.1, num_ctx: opts.contextSize ?? 4096, num_predict: maxTokens, ...threadOption(p) },
@@ -181,6 +227,7 @@ export async function chat(opts: ChatOptions, onToken?: (token: string) => void)
 // ---------- Embeddings ----------
 export async function embedWith(p: Provider, inputs: string[], kind: "query" | "document" = "document"): Promise<number[][]> {
   const label = providerKinds[p.kind].label, model = p.embeddingModel;
+  await ensureModel(p, model);
   const data = await jsonOrThrow(label, await http(label, `${p.baseUrl}/api/embed`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, json: { model, input: inputs.map(t => embeddingPrefix(model, kind) + t), keep_alive: "30m", ...(tunedThreads(p.baseUrl) ? { options: threadOption(p) } : {}) } }), model);
   const vectors: number[][] = data.embeddings;
   if (!Array.isArray(vectors) || vectors.length !== inputs.length || vectors.some(v => !Array.isArray(v))) throw new Error(`${p.name} retornou embeddings incompletos para ${model}. Verifique se o modelo existe.`);

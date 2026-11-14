@@ -1,14 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { chat } from "./ai.js";
-import { db, dbPath } from "./database.js";
+import { dataDir, db } from "./database.js";
 import { chatContext, generationProfile, redactInjection } from "./rag.js";
 
 // Resumo "one page" de todos os documentos do notebook: um resumo por documento (map) e uma visão geral sobre eles (reduce),
 // montados em um HTML A4 autônomo para download (abre no navegador; Ctrl+P salva em PDF).
 export type OnePageJob = { status: "running" | "done" | "failed"; done: number; total: number; error?: string; file?: string };
 const jobs = new Map<string, OnePageJob>();
-const reportsDir = path.join(path.dirname(dbPath), "reports");
+const reportsDir = path.join(dataDir, "reports");
 // A chave é o id do notebook (one page) ou "doc-<id>" (resumo detalhado de um documento).
 export const onePageJob = (key: string) => jobs.get(key);
 export const onePageFile = (key: string) => path.join(reportsDir, `${key.replace(/[^\w-]/g, "")}.html`);

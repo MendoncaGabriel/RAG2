@@ -1,88 +1,149 @@
-# Uso: docker compose up -d --build   -> app em http://localhost:${PORT:-3000}
-# Sobe junto o Ollama e baixa os modelos de chat e embeddings (primeira vez: alguns minutos, ~2 GB).
-# Na primeira inicialização o app já cadastra e ativa esse Ollama; outros servidores Ollama podem ser adicionados em Configurações.
-# O app só inicia depois que os modelos terminam de baixar. Acompanhe com: docker compose logs -f ollama-init
-# Obs.: docker-compose.linux.yml (network_mode host) não alcança o Ollama por nome; use-o só com IA externa.
+# Bento (RAG) — execução exclusivamente via Docker Compose no WSL2.
+#   docker compose up -d --build          → app em http://localhost:${PORT:-3000}
+#   docker compose down                   → para (os dados ficam em ${VOLUMES_DIR:-./volumes})
+#   docker compose --profile test run --rm tests   → testes unitários + integração reais
+# Serviços: aplicação Node.js e Qdrant, numa rede interna. O Ollama NÃO roda aqui: é o do Windows 11 (OLLAMA_BASE_URL).
+# Volumes: Qdrant e SQLite exigem disco local POSIX (ext4 do WSL); não use pastas do Windows (/mnt/c) em VOLUMES_DIR.
 name: rag
-services:
-  ollama:
-    image: ollama/ollama:latest
-    restart: unless-stopped
-    networks:
-      - app_net
-    volumes:
-      - ./data/ollama:/root/.ollama
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 5s
-      timeout: 10s
-      retries: 30
 
-  # Baixa os modelos (idempotente: nada é baixado de novo se já existirem) e encerra.
-  ollama-init:
-    image: ollama/ollama:latest
+x-app-env: &app-env
+  NODE_ENV: production
+  # Bancos: SQLite (textos, metadados, conversas) e Qdrant (vetores) pela rede interna do Compose.
+  SQLITE_PATH: /app/volumes/sqlite/database.db
+  APP_DATA_DIR: /app/volumes/app
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY: ${QDRANT_API_KEY:?defina QDRANT_API_KEY no .env}
+  QDRANT_COLLECTION: ${QDRANT_COLLECTION:-rag_chunks}
+  QDRANT_QUANTILE: ${QDRANT_QUANTILE:-0.99}
+  QDRANT_OVERSAMPLING: ${QDRANT_OVERSAMPLING:-2}
+  QDRANT_HNSW_EF: ${QDRANT_HNSW_EF:-128}
+  QDRANT_ON_DISK_VECTORS: ${QDRANT_ON_DISK_VECTORS:-true}
+  # Ollama do Windows 11 (IP do Windows visto pelo WSL2; ver scripts/windows/ollama-wsl-bridge.ps1).
+  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?defina OLLAMA_BASE_URL no .env (IP do Windows visto pelo WSL2)}
+  OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+  OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:?defina OLLAMA_LLM_MODEL no .env}
+  OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:?defina OLLAMA_EMBEDDING_MODEL no .env}
+  OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-}
+  AUTOTUNE: ${AUTOTUNE:-true}
+  # Ingestão e chunking.
+  OCR_LANG: ${OCR_LANG:-por+eng}
+  MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
+  CHUNK_SIZE: ${CHUNK_SIZE:-700}
+  CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
+  DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
+  EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-8}
+  BM25_AVG_DOC_LEN: ${BM25_AVG_DOC_LEN:-80}
+  # Recuperação e geração (vazio = decidido pelo perfil do modelo).
+  RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-}
+  MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.48}
+  MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-}
+  NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
+  CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
+  HISTORY_MESSAGES: ${HISTORY_MESSAGES:-4}
+  HISTORY_MAX_CHARS: ${HISTORY_MAX_CHARS:-2000}
+  MAX_MESSAGES_PER_CONVERSATION: ${MAX_MESSAGES_PER_CONVERSATION:-40}
+
+services:
+  # Cria as pastas dos volumes com o dono certo (os demais serviços não rodam como root).
+  volumes-init:
+    image: busybox:1.37.0
     restart: "no"
-    networks:
-      - app_net
-    depends_on:
-      ollama:
-        condition: service_healthy
+    network_mode: none
+    user: "0:0"
     environment:
-      OLLAMA_HOST: http://ollama:11434
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:3b}
-      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
-    entrypoint: ["/bin/sh", "-c", "ollama pull $$OLLAMA_CHAT_MODEL && ollama pull $$OLLAMA_EMBEDDING_MODEL"]
+      OWNER: "${APP_UID:-1000}:${APP_GID:-1000}"
+    command: ["sh", "-c", "mkdir -p /v/qdrant /v/sqlite /v/app && chown $${OWNER} /v/qdrant /v/sqlite /v/app && chmod 0750 /v/qdrant /v/sqlite /v/app"]
+    volumes:
+      - ${VOLUMES_DIR:-./volumes}:/v
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+
+  qdrant:
+    image: qdrant/qdrant:v1.19.2-unprivileged
+    restart: unless-stopped
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    depends_on:
+      volumes-init:
+        condition: service_completed_successfully
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:?defina QDRANT_API_KEY no .env}
+      QDRANT__STORAGE__STORAGE_PATH: /qdrant/data/storage
+      QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/data/snapshots
+      QDRANT__TELEMETRY_DISABLED: "true"
+    volumes:
+      - ${VOLUMES_DIR:-./volumes}/qdrant:/qdrant/data
+    # Sem portas publicadas: acessível só pela rede interna (a aplicação usa http://qdrant:6333).
+    networks: [backend]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q ' 200 ' <&3"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
   rag:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: rag-local
     init: true
     restart: unless-stopped
-    user: "${APP_UID:-0}:${APP_GID:-0}"
-    networks:
-      - app_net
-    ports:
-      - "${PORT:-3000}:3000"
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
     depends_on:
-      ollama-init:
+      volumes-init:
         condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+    # backend: Qdrant (interna, sem saída) · egress: Ollama do Windows e downloads dos modelos de voz.
+    networks: [backend, egress]
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${PORT:-3000}:3000"
     environment:
-      NODE_ENV: production
+      <<: *app-env
+      PORT: 3000
       MASTER_USER: ${MASTER_USER:?defina MASTER_USER no .env}
       MASTER_PASSWORD: ${MASTER_PASSWORD:?defina MASTER_PASSWORD no .env}
       JWT_SECRET: ${JWT_SECRET:-}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
-      TRUST_PROXY: ${TRUST_PROXY:-true}
-      PORT: 3000
-      OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_CHAT_MODEL: ${OLLAMA_CHAT_MODEL:-qwen2.5:3b}
-      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-bge-m3}
-      OCR_LANG: ${OCR_LANG:-por+eng}
-      CHUNK_SIZE: ${CHUNK_SIZE:-700}
-      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
-      RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-}
-      MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.48}
-      MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-}
-      NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
-      DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
-      CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
-      # Vazio = medido automaticamente na inicialização (data/tuning.json).
-      OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-}
-      AUTOTUNE: ${AUTOTUNE:-true}
-      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
-      # Modo de voz: modelos baixados no 1º uso para ./data/voice.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      PRESENT_ASK_PER_MIN: ${PRESENT_ASK_PER_MIN:-20}
+      # Modo de voz: modelos baixados no 1º uso para APP_DATA_DIR/voice.
       VOICE_ENABLED: ${VOICE_ENABLED:-true}
       VOICE_STT_MODEL: ${VOICE_STT_MODEL:-parakeet}
       VOICE_STT_LANGUAGE: ${VOICE_STT_LANGUAGE:-pt}
       VOICE_NUM_THREADS: ${VOICE_NUM_THREADS:-4}
       VOICE_HF_URL: ${VOICE_HF_URL:-https://huggingface.co}
     volumes:
-      - ./data:/app/data
-    # Permite cadastrar o Ollama do host (ex.: http://host.docker.internal:11434) nas Configurações.
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - ${VOLUMES_DIR:-./volumes}/sqlite:/app/volumes/sqlite
+      - ${VOLUMES_DIR:-./volumes}/app:/app/volumes/app
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+
+  # Testes (só com --profile test): unitários + integração com o Qdrant deste Compose e o Ollama do Windows.
+  # Usam collections temporárias próprias (it_*, bench_*) e um SQLite temporário; não tocam nos dados da aplicação.
+  tests:
+    profiles: [test]
+    build:
+      context: .
+      target: test
+    image: rag-local-test
+    user: "${APP_UID:-1000}:${APP_GID:-1000}"
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    networks: [backend, egress]
+    environment:
+      <<: *app-env
+      MASTER_USER: test
+      MASTER_PASSWORD: test
+    command: ["npm", "test"]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
 
 networks:
-  app_net:
-    name: app_net
+  backend:
+    internal: true
+  egress: {}

@@ -1,6 +1,12 @@
 node_modules
 data
+volumes
 dist
 .git
 .env
+.env.*
+!.env.example
+.temp
+.claude
+.vscode
 npm-debug.log*

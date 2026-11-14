@@ -6,7 +6,8 @@ import os from "node:os";
 import path from "node:path";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-test-"));
-process.env.DATABASE_PATH = path.join(tmp, "test.sqlite");
+process.env.SQLITE_PATH = path.join(tmp, "test.sqlite");
+process.env.APP_DATA_DIR = tmp;
 process.env.UPLOAD_DIR = path.join(tmp, "uploads");
 const { cleanPdfPages, chunkStructured, isTocChunk } = await import("../src/chunking.js");
 const { embeddingInput } = await import("../src/documents.js");

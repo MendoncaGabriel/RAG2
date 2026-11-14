@@ -3,11 +3,15 @@ node_modules/
 dist/
 *.tsbuildinfo
 
-# Dados locais (banco SQLite, uploads, dados de OCR)
+# Dados locais (volumes do Docker: Qdrant, SQLite, uploads; e a pasta data/ da versão anterior)
 data/
+volumes/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
 
 # Segredos e configuração local
 .env

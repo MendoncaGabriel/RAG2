@@ -1,7 +1,7 @@
 // Ajuste automático ao computador: roda na inicialização, antes do servidor aceitar conexões, e serve para qualquer PC.
 // 1) Detecta CPU (núcleos físicos/lógicos), RAM e GPU.
 // 2) Mede no próprio PC, com o modelo de chat ativo, quantas threads deixam o Ollama mais rápido (leitura do prompt + geração)
-//    e guarda o resultado em data/tuning.json (chave: hardware + servidor + versão do Ollama + modelo). "npm run tune" mede de novo.
+//    e guarda o resultado em APP_DATA_DIR/tuning.json (chave: hardware + servidor + versão do Ollama + modelo). "npm run tune" mede de novo.
 //    Se o modelo roda inteiro na GPU, as threads quase não importam e a varredura é pulada.
 // 3) Pré-carrega embeddings e chat com as mesmas opções das perguntas (num_ctx/num_thread iguais: o Ollama não recarrega),
 //    e avisa quando a GPU está ociosa ou quando chat e embeddings se expulsam da memória a cada pergunta.
@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { dbPath } from "./database.js";
+import { dataDir } from "./database.js";
 import { isReasoningOnly } from "./modelprofile.js";
 
 export interface Hardware { cpu: string; logical: number; physical: number; ramGB: number; freeGB: number; gpus: string[] }
@@ -23,7 +23,7 @@ export type Sample = { threads: number; promptTps: number; evalTps: number; seco
 export interface TuneResult { key: string; at: string; baseUrl: string; model: string; numThread?: number; device: "cpu" | "gpu" | "misto"; samples: Sample[] }
 
 const exec = promisify(execFile);
-const cacheFile = () => path.join(path.dirname(dbPath), "tuning.json");
+const cacheFile = () => path.join(dataDir, "tuning.json");
 let current: TuneResult | null = null;
 
 // Threads usadas nas chamadas ao Ollama: OLLAMA_NUM_THREAD (sobrescrita manual) > valor medido para este servidor > padrão do Ollama.

@@ -3,7 +3,12 @@
 // e tabelas são divididas por grupos de linhas inteiras com o cabeçalho repetido: uma linha nunca é cortada ao meio,
 // então o código, o nome e os atributos de um registro ficam sempre no mesmo trecho.
 
-export type Chunk = { content: string; section: string };
+// pageStart/pageEnd: páginas de origem (PDF), quando conhecidas.
+export type Chunk = { content: string; section: string; pageStart?: number; pageEnd?: number };
+// Marcador de página entre páginas do PDF (linha com form feed + número). Não entra no texto dos trechos.
+export const pageMarker = (page: number) => `\f${page}`;
+const pageMarkerRe = /^\f(\d{1,5})$/;
+export const stripPageMarkers = (text: string) => text.replace(/^\f\d{1,5}\n?/gm, "");
 
 const chunkSize = () => Math.max(100, Number(process.env.CHUNK_SIZE) || 700);
 const chunkOverlap = (size: number) => Math.min(size - 1, Math.max(0, Number(process.env.CHUNK_OVERLAP) || 100));
@@ -65,7 +70,7 @@ export function cleanPdfPages(pages: string[]): string {
   });
   const minPages = Math.max(3, Math.ceil(pages.length * 0.4));
   const repeated = pages.length >= 3 ? new Set([...seen].filter(([k, n]) => n >= minPages && k.length <= 150 && (inner.get(k) || 0) <= n * 0.25).map(([k]) => k)) : new Set<string>();
-  return split.map((lines, p) => lines.flatMap((line, i) => {
+  return split.map((lines, p) => `${pageMarker(p + 1)}\n` + lines.flatMap((line, i) => {
     const t = line.trim();
     if (!t) return [line];
     if (edges[p].has(i) && (repeated.has(lineKey(line)) || pageNumberLine.test(t))) return [];
@@ -84,7 +89,7 @@ export const isTocChunk = (text: string) => {
   return toc >= 2 && toc >= lines.length * 0.3;
 };
 
-type Block = { kind: "heading" | "table" | "list" | "text"; lines: string[]; level?: number };
+type Block = { kind: "heading" | "table" | "list" | "text"; lines: string[]; level?: number; page?: number; pageEnd?: number };
 const headingRe = /^(#{1,6})\s+(.+?)\s*#*\s*$/;
 const isTableLine = (l: string) => /^\s*\|.*\|\s*$/.test(l);
 const isSeparator = (l: string) => /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l);
@@ -93,12 +98,14 @@ const isListLine = (l: string) => /^\s*(?:[-*+•]|\d{1,3}[.)])\s+/.test(l);
 function blocks(text: string): Block[] {
   const lines = text.replace(/\r/g, "").split("\n");
   const out: Block[] = [];
-  let cur = null as Block | null;
+  let cur = null as Block | null, page: number | undefined;
   const flush = () => { if (cur && cur.lines.some(l => l.trim())) out.push(cur); cur = null; };
   for (const raw of lines) {
+    const marker = raw.match(pageMarkerRe);
+    if (marker) { page = Number(marker[1]); continue; }
     const line = raw.replace(/[ \t]+$/g, "");
     const h = line.match(headingRe);
-    if (h) { flush(); out.push({ kind: "heading", lines: [h[2].replace(/\*\*/g, "").trim()], level: h[1].length }); continue; }
+    if (h) { flush(); out.push({ kind: "heading", lines: [h[2].replace(/\*\*/g, "").trim()], level: h[1].length, page, pageEnd: page }); continue; }
     if (!line.trim()) {
       // Linha em branco encerra tabela/parágrafo; listas toleram uma linha em branco entre itens.
       if (cur?.kind !== "list") flush();
@@ -106,8 +113,9 @@ function blocks(text: string): Block[] {
     }
     const kind: Block["kind"] = isTableLine(line) ? "table" : isListLine(line) ? "list" : (cur?.kind === "list" && /^\s{2,}\S/.test(raw)) ? "list" : "text";
     if (cur && cur.kind !== kind) flush();
-    if (!cur) cur = { kind, lines: [] };
+    if (!cur) cur = { kind, lines: [], page };
     cur.lines.push(line);
+    cur.pageEnd = page;
   }
   flush();
   return out;
@@ -134,26 +142,31 @@ export function chunkStructured(text: string): Chunk[] {
   const path: { level: number; title: string }[] = [];
   const out: Chunk[] = [];
   let buffer: string[] = [], bufferSection = "";
+  // Páginas do conteúdo em construção (PDF): primeira e última página dos blocos que formam o trecho.
+  let pages: { start?: number; end?: number } = {}, bufferPages: typeof pages = {};
   const section = () => path.map(p => p.title).join(" > ");
   const prefix = (s: string) => s ? `[Seção: ${s}]\n` : "";
-  const push = (body: string, s: string) => {
+  const withPages = (c: Chunk, p: typeof pages) => (p.start ? { ...c, pageStart: p.start, pageEnd: p.end ?? p.start } : c);
+  const push = (body: string, s: string, p = pages) => {
     const content = (prefix(s) + body).trim();
     if (body.trim().length < 30 && out.length) {
       // Fragmento curto (ex.: título solto) é anexado ao trecho anterior da mesma seção em vez de virar ruído.
       const last = out[out.length - 1];
-      if (last.section === s && last.content.length + body.length < size * 1.3) { last.content += `\n${body.trim()}`; return; }
+      if (last.section === s && last.content.length + body.length < size * 1.3) { last.content += `\n${body.trim()}`; if (p.end && last.pageStart) last.pageEnd = Math.max(last.pageEnd ?? p.end, p.end); return; }
     }
     if (out.length && out[out.length - 1].content === content) return;
-    out.push({ content, section: s });
+    out.push(withPages({ content, section: s }, p));
   };
-  const flushBuffer = () => { if (buffer.length) push(buffer.join("\n\n"), bufferSection); buffer = []; };
+  const flushBuffer = () => { if (buffer.length) push(buffer.join("\n\n"), bufferSection, bufferPages); buffer = []; bufferPages = {}; };
   const add = (unit: string) => {
     const s = section();
     if (buffer.length && (bufferSection !== s || buffer.join("\n\n").length + unit.length + 2 > size)) flushBuffer();
     bufferSection = s;
     buffer.push(unit);
+    if (pages.start) bufferPages = { start: bufferPages.start ?? pages.start, end: pages.end ?? pages.start };
   };
   for (const b of blocks(text)) {
+    pages = { start: b.page, end: b.pageEnd ?? b.page };
     if (b.kind === "heading") {
       flushBuffer();
       const level = b.level!;

@@ -1,60 +1,137 @@
 # Bento
 
-Bento é uma aplicação local de RAG com notebooks independentes, Express/TypeScript, SQLite e IA exclusivamente com Ollama (chat e embeddings locais). Usa o módulo SQLite integrado ao Node.js (`node:sqlite`, Node 22.13+), evitando dependências nativas para o banco. A recuperação é semântica: embeddings persistidos como vetores Float32 no SQLite e similaridade de cosseno calculada localmente em JavaScript, filtrando estritamente pelo notebook selecionado. Isso evita dependências nativas adicionais (`sqlite-vec`). A busca é exata e linear, adequada a bases locais pequenas e médias.
+Bento é uma aplicação local de RAG com notebooks independentes (Express/TypeScript). A arquitetura separa as responsabilidades em três peças:
+
+| Componente | Onde roda | Responsabilidade |
+|---|---|---|
+| **Qdrant** 1.19 | container (rede interna do Compose) | Recuperação: vetores densos (embeddings) + vetores esparsos BM25, busca híbrida, filtros por notebook/documento/código, quantização INT8 |
+| **SQLite** (`node:sqlite`) | dentro do container da aplicação, arquivo em volume | Fonte de verdade: textos originais dos trechos, metadados, documentos, registros estruturados, conversas, mensagens salvas, estado de indexação |
+| **Ollama** | **Windows 11** (fora do Docker) | Modelo de embeddings (`bge-m3`) e LLM (`qwen3:1.7b`) |
+
+Tudo roda por Docker Compose no WSL2; o único serviço fora dos containers é o Ollama já instalado no Windows. Não há suporte a execução nativa com Node.js.
 
 ## Requisitos
 
-- Node.js 22.13 ou superior e npm.
-- Ollama em execução (`ollama serve`), na mesma máquina ou em outro servidor.
-- Espaço em disco para o SQLite e arquivos enviados.
+- Windows 11 com WSL2 (Ubuntu) e Docker Engine + Compose v2 dentro do WSL2.
+- Ollama instalado no Windows com os modelos configurados (`ollama pull qwen3:1.7b` e `ollama pull bge-m3`). O app **não** baixa modelos sozinho: se faltar algum, avisa qual.
+- Disco Linux (ext4 do WSL) para os volumes do Qdrant e do SQLite — veja [Volumes](#volumes).
 
 ## Instalação e execução
 
-```bash
-npm install
-```
+1. **Ponte Ollama → WSL2 (uma vez, no Windows, PowerShell como Administrador):**
 
-Copie `.env.example` para `.env` (no Windows: `copy .env.example .env`) e ajuste se necessário. Inicie com:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\windows\ollama-wsl-bridge.ps1
+   ```
 
-```bash
-npm run dev
-```
+   O Ollama continua escutando só em `127.0.0.1:11434`. O script cria um `portproxy` que escuta **apenas** no IP do Windows na interface virtual do WSL (ex.: `172.29.48.1`) e uma regra de firewall de entrada restrita a esse IP e à sub-rede do WSL — o Ollama não fica exposto ao Wi‑Fi/rede corporativa (não use `OLLAMA_HOST=0.0.0.0`). O script imprime o `OLLAMA_BASE_URL` a usar. Se o WSL trocar de sub-rede (pode acontecer após reiniciar o Windows), rode o script de novo e atualize o `.env`; o app avisa no log e em `/healthz` quando não alcança o Ollama. `-Remove` desfaz a ponte.
 
-Acesse http://localhost:3000 e abra **Configurações** (engrenagem no topo) para cadastrar a IA — veja a seção abaixo. Para verificar a compilação TypeScript: `npm run typecheck`. Para gerar a versão de produção e executá-la localmente: `npm run build` e `npm start`. Ao iniciar (`npm start` ou `npm run dev`), o app primeiro analisa o PC e ajusta o Ollama a ele — veja [Ajuste automático ao computador](#ajuste-automático-ao-computador).
+2. **Configuração (no WSL2, na pasta do projeto):** `cp .env.example .env` e preencha `MASTER_PASSWORD`, `JWT_SECRET` (`openssl rand -hex 48`), `QDRANT_API_KEY` (`openssl rand -hex 32`) e `OLLAMA_BASE_URL` (no WSL: `ip route show default | awk '{print $3}'`).
 
-### Docker Compose
+3. **Subir / parar:**
 
-Um único comando sobe tudo: o app, um Ollama e o download dos modelos (`qwen2.5:3b` para chat e `bge-m3` para embeddings, ~2 GB na primeira vez; acompanhe com `docker compose logs -f ollama-init`). O app inicia só depois do download e já vem com o provedor "Ollama (local)" cadastrado e ativo. Os modelos podem ser trocados com `OLLAMA_CHAT_MODEL` e `OLLAMA_EMBEDDING_MODEL` no `.env`.
+   ```bash
+   docker compose up -d --build     # http://localhost:3000 (também pelo navegador do Windows)
+   docker compose logs -f rag       # logs da aplicação
+   docker compose ps                # estado e healthchecks
+   docker compose down              # para; os dados ficam nos volumes
+   ```
 
-```bash
-docker compose up -d --build   # http://localhost:3000 (porta configurável com PORT)
-```
+Na inicialização a aplicação valida as variáveis obrigatórias, espera o Qdrant, confere o Ollama do Windows e os modelos, cria a collection se não existir e reconcilia SQLite ↔ Qdrant. `GET /healthz` mostra o estado de SQLite, Qdrant e Ollama (503 se algum falhar).
 
-O `docker-compose.linux.yml` (`network_mode: host`) não alcança o Ollama do Compose por nome; use-o apenas com IA externa:
+### Serviços do Compose
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.linux.yml up -d --build
-```
+- `qdrant` — `qdrant/qdrant:v1.19.2-unprivileged` (uid 1000), API key obrigatória, telemetria desligada, **sem porta publicada**: só a rede interna `backend` (marcada `internal`, sem saída) o alcança; a aplicação usa `http://qdrant:6333`. Healthcheck em `/readyz`.
+- `rag` — aplicação (imagem `rag-local`, usuário `node`, `cap_drop: ALL`, `no-new-privileges`). Redes `backend` (Qdrant) e `egress` (Ollama do Windows, download dos modelos de voz). Porta publicada só em `127.0.0.1` do WSL (`APP_BIND`), alcançável pelo `localhost` do Windows.
+- `volumes-init` — cria as pastas dos volumes com o dono certo e termina.
+- `tests` — só com `--profile test` (veja [Testes](#testes)).
 
-Para usar um proxy (nginx, Caddy, Traefik…), conecte-o à rede `app_net` apontando para `rag:3000`. Para usar um Ollama do host, cadastre-o com a URL `http://host.docker.internal:11434`. Todos os dados (SQLite, uploads, OCR) ficam em `./data`; o container roda como root por padrão para poder gravar nessa pasta (use `APP_UID`/`APP_GID` para outro usuário). Logs: `docker compose logs -f rag`.
+### Volumes
 
-No modo `docker-compose.linux.yml` o container usa a rede do host (`network_mode: host`), então `app_net` e o nome `rag` não se aplicam: o app fica em `localhost:3000` do servidor. Nesse modo cadastre o Ollama como `http://127.0.0.1:11434`. Alternativa sem esse arquivo: iniciar o Ollama com `OLLAMA_HOST=0.0.0.0`. O arquivo exige Docker Compose 2.24+.
+| Pasta (`${VOLUMES_DIR:-./volumes}`) | Conteúdo |
+|---|---|
+| `qdrant/` | dados e snapshots do Qdrant |
+| `sqlite/` | `database.db` (+ WAL) |
+| `app/` | uploads originais, relatórios, dados de OCR, modelos de voz, `tuning.json` |
+
+Os dados sobrevivem a `docker compose down/up`, reinício do Docker/WSL e reconstrução da imagem. **Qdrant e SQLite (WAL) não funcionam de forma confiável em pastas do Windows montadas no WSL (`/mnt/c`, 9p)** — o próprio Qdrant não suporta esse tipo de sistema de arquivos. Se o projeto estiver em `/mnt/c/...`, defina `VOLUMES_DIR` no `.env` para uma pasta do Linux (ex.: `/home/<usuario>/rag-volumes`); com o projeto dentro do WSL (ex.: `~/RAG2`), o padrão `./volumes` serve. A aplicação avisa no log se o SQLite estiver numa montagem 9p/drvfs.
+
+## Arquitetura de recuperação
+
+### Ingestão (duas fases, sem transação distribuída)
+
+1. Extração e limpeza do texto (PDF por página, DOCX, PPTX, planilhas, OCR de imagens…) e **chunking estrutural** (abaixo).
+2. **SQLite, numa transação:** trechos com **ID determinístico** (UUID derivado de documento + posição), texto original, texto normalizado, seção, páginas, marca de sumário; registros estruturados; documento em `stage='index'`.
+3. **Qdrant, em lotes** (`EMBED_BATCH_SIZE`): embeddings (Ollama) + vetor esparso BM25 por trecho → `upsert` com `wait=true` → o lote é marcado `indexed=1` no SQLite. Pontos excedentes de uma versão anterior maior do documento são removidos.
+4. Só então o documento vira `processed` (`stage='done'`, com o modelo de embeddings usado).
+
+Garantias: reprocessar/reindexar sobrescreve os mesmos IDs (idempotente, sem duplicatas); se o Ollama ou o Qdrant cair no meio, os trechos já estão no SQLite e a indexação **retoma só o que falta** (na inicialização, a cada `SYNC_INTERVAL_MIN` se houver pendências, em `POST /api/system/sync` ou com "Reprocessar"). Exclusões apagam primeiro no SQLite (a busca ignora pontos sem linha no SQLite) e depois no Qdrant; se o Qdrant estiver fora, ficam em `vector_deletions` e a reconciliação conclui.
+
+**Reconciliação** (`reconcile` em [src/indexing.ts](src/indexing.ts)): compara a contagem de pontos por documento no Qdrant (facet exato) com o SQLite, remove pontos órfãos (documentos/mensagens que não existem mais), reindexa documentos divergentes, retoma indexações interrompidas e, se a collection sumir (volume perdido), **reconstrói o índice inteiro a partir do SQLite**.
+
+### Busca (por pergunta)
+
+1. Pergunta normalizada (acompanhamentos viram autônomos, ver "Memória de conversa"); consultas estruturadas (filtros, somas, contagens) são respondidas direto pelos registros do SQLite.
+2. Embedding da pergunta no Ollama (cache LRU de 256 consultas).
+3. **Uma ida ao Qdrant** (`/points/query/batch`), sempre filtrada pelo notebook: busca **densa** (HNSW sobre INT8 + rescore com os vetores originais), busca **esparsa BM25**, busca por **código exato** (`codes` com índice de payload, quando a pergunta cita códigos) e uma **amostra aleatória** re-pontuada (média/desvio da similaridade no notebook, para o portão de relevância por z-score). Sumários ficam fora das listas densa/esparsa.
+4. União dos IDs → textos e metadados **em lote no SQLite** (só documentos `processed`).
+5. **Fusão RRF** (k=60) das listas densa e esparsa, com o voto lexical ponderado pela fração dos termos da pergunta presentes no trecho; casamento exato de código e período citado têm prioridade; portão de relevância; corte relativo.
+6. Trechos vizinhos, montagem do contexto com limite de tamanho, LLM do Windows em streaming.
+
+A fusão é feita na aplicação (e não com `fusion: rrf` do Qdrant) porque o ranqueamento usa as pontuações individuais de cada lista (portão por z-score, cobertura de termos), calibradas pelo benchmark. Um reranking futuro pode entrar entre os passos 4 e 5 sem mudar o resto.
+
+### Collection do Qdrant
+
+| Item | Configuração | Motivo |
+|---|---|---|
+| Vetor denso `dense` | dimensão do modelo (1024 no `bge-m3`), Cosine, `on_disk: true` | originais em disco (memmap); a RAM fica com os quantizados |
+| Vetor esparso `bm25` | `modifier: idf` | o Qdrant calcula o IDF; a aplicação envia a frequência saturada BM25 (k1=1,4, b=0,75, comprimento médio `BM25_AVG_DOC_LEN`) |
+| Quantização | `scalar int8`, `quantile 0.99`, `always_ram: true` | 4× menos RAM por vetor (1 KB em vez de 4 KB no bge-m3) |
+| Busca | `rescore: true`, `oversampling: 2`, `hnsw_ef: 128` | pré-seleção quantizada, ordem final com float32: precisão preservada |
+| HNSW | `m: 0`, `payload_m: 16` + `notebook_id` com `is_tenant` | multitenancy: um grafo por notebook, sem grafo global (toda busca é por notebook) |
+| Índices de payload | `notebook_id`, `document_id`, `source_type`, `codes` (keyword), `chunk_index` (integer), `toc` (bool) | filtros, exclusão por documento, faceta da reconciliação |
+| Payload | IDs, posição, códigos, página, modelo — **sem o texto** | o texto fica só no SQLite |
+
+Trocar o modelo de embeddings: as perguntas avisam para clicar em **Reindexar** (nunca misturam vetores de modelos diferentes); a primeira reindexação recria a collection com a nova dimensão.
+
+### Chunking
+
+- **Estrutural:** divide por seção (o caminho de títulos vai no início de cada trecho, `[Seção: …]`), tabelas são cortadas só entre linhas e repetem o cabeçalho, listas não são quebradas no meio de um item, prosa longa é dividida por parágrafo/frase com `CHUNK_OVERLAP`; fragmentos curtos (título solto) são anexados ao trecho anterior. CSV e planilhas viram tabelas Markdown.
+- **PDF:** cabeçalhos e rodapés repetidos, números de página e linhas de sumário são removidos, títulos numerados ("5.2 Oven Monitoring") viram seções, e cada trecho guarda as **páginas de origem** (`page_start`/`page_end`, exibidas nas fontes como "p. N").
+- O vetor de cada trecho leva o nome do documento; `CHUNK_SIZE`/`CHUNK_OVERLAP` são configuráveis.
+- **Registros:** linhas de tabelas e fichas no formato `### CÓDIGO — Título` + `- **Campo:** valor` ficam na tabela `records`. Perguntas de filtro ("orçamento acima de R$ 500.000"), comparação entre colunas, contagem, soma, média, maior/menor, ordenação e listagem completa são respondidas por cálculo determinístico sobre todos os registros. `STRUCTURED_QUERIES=false` desliga.
+
+### SQLite
+
+Tabelas: `notebooks`, `documents` (status, `stage`, progresso, modelo de embeddings, texto colado), `chunks` (texto, texto normalizado, seção, páginas, `toc`, `indexed`; `UNIQUE(document_id, chunk_index)`), `records`, `conversations`, `messages`, `saved_messages` (`indexed`), `vector_deletions`, `settings`, `ai_providers`. Sem embeddings e sem cálculo de similaridade. Bancos da versão anterior (vetores em BLOB) não são migrados: a aplicação recusa e pede um `SQLITE_PATH` novo.
 
 ## Configuração
 
-`DATABASE_PATH`, `UPLOAD_DIR`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `CHAT_MAX_TOKENS` e `DOCUMENT_PROCESS_CONCURRENCY` são lidos do ambiente. Modelos e provedores não vêm do ambiente: são cadastrados na tela de Configurações. Para recuperação multilíngue português/inglês, `bge-m3` (Ollama) é uma boa escolha. Para servidor limitado, comece com `CHUNK_SIZE=700`, `CHUNK_OVERLAP=100`, `RETRIEVAL_TOP_K=4`, `MIN_RELEVANCE_SCORE=0.18`, `MAX_CONTEXT_CHARS=7000`, `CHAT_MAX_TOKENS=384` e `DOCUMENT_PROCESS_CONCURRENCY=1`. O processamento sequencial evita cargas simultâneas de OCR/embeddings e picos de memória; pode ser elevado a `2` para mais vazão se houver memória disponível. Menos contexto/resposta reduz RAM e latência; se respostas não recuperarem evidências suficientes, reduza `MIN_RELEVANCE_SCORE` ou aumente `MAX_CONTEXT_CHARS`/`RETRIEVAL_TOP_K`. A recuperação combina similaridade semântica com correspondência de termos exatos e percorre os vetores incrementalmente para manter o uso de memória limitado. Use sempre o mesmo modelo de embeddings para indexar e consultar; trocar modelo exige reprocessar todos os documentos já indexados. Diretórios e banco são criados localmente. Para trocar as configurações, pare o servidor antes de copiar/editar `.env`.
+Todas as variáveis estão em [.env.example](.env.example) (comentadas) e são repassadas pelo [docker-compose.yml](docker-compose.yml). Obrigatórias (validadas na inicialização): `MASTER_USER`, `MASTER_PASSWORD`, `QDRANT_API_KEY`, `OLLAMA_BASE_URL`, `OLLAMA_LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`.
 
-### Recuperação estruturada e testes
+- **Conexões:** `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, `QDRANT_URL` (fixo `http://qdrant:6333` no Compose), `QDRANT_API_KEY`, `QDRANT_COLLECTION`.
+- **Modelos:** `OLLAMA_LLM_MODEL` (respostas) e `OLLAMA_EMBEDDING_MODEL` (busca), independentes. O Ollama do ambiente aparece em Configurações como "Ollama (Windows)" e é atualizado a cada inicialização; outros servidores podem ser cadastrados lá.
+- **Qdrant:** `QDRANT_QUANTILE`, `QDRANT_OVERSAMPLING`, `QDRANT_HNSW_EF`, `QDRANT_ON_DISK_VECTORS`.
+- **Ingestão:** `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBED_BATCH_SIZE`, `BM25_AVG_DOC_LEN`, `DOCUMENT_PROCESS_CONCURRENCY`, `MAX_FILE_SIZE_MB`, `OCR_LANG`, `SYNC_INTERVAL_MIN`.
+- **Geração e busca:** `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `NEIGHBOR_EXPAND_TOP`, `CHAT_MAX_TOKENS`, `HISTORY_MESSAGES`, `HISTORY_MAX_CHARS` (vazios = perfil do modelo).
+- **Infra:** `PORT`, `APP_BIND`, `VOLUMES_DIR`, `APP_UID`/`APP_GID`.
 
-- **Chunking estrutural:** os documentos são divididos por seção (o caminho de títulos vai no início de cada trecho), tabelas são cortadas só entre linhas e repetem o cabeçalho, e listas não são quebradas no meio de um item. CSV e planilhas viram tabelas Markdown. Em PDFs, cabeçalhos e rodapés repetidos em todas as páginas, números de página e linhas de sumário são removidos, e títulos numerados ("5.2 Oven Monitoring") viram seções. O vetor de cada trecho leva o nome do documento; na busca, trechos de sumário são ignorados e a correspondência de termos pesa pela fração dos termos da pergunta presentes no trecho (ajuda com documentos em inglês e perguntas em português).
-- **Registros:** linhas de tabelas e fichas no formato `### CÓDIGO — Título` + `- **Campo:** valor` ficam na tabela `records`. Perguntas de filtro ("orçamento acima de R$ 500.000"), comparação entre colunas ("abaixo do estoque mínimo"), contagem, soma, média, maior/menor, ordenação e listagem completa são respondidas por cálculo determinístico sobre todos os registros, com o cálculo mostrado na resposta. `STRUCTURED_QUERIES=false` desliga.
-- **Busca:** códigos exatos citados na pergunta (`PRJ-ARARA`, `APP-MES`) têm prioridade sobre trechos apenas semelhantes, e o período citado (mês/ano) favorece o trecho histórico correspondente. As fontes exibidas são só as que sustentam a resposta.
-- **Documentos antigos:** continuam funcionando. Na inicialização, os registros estruturados são extraídos do arquivo original sem recalcular embeddings; para o chunking novo, use "Reprocessar".
-- `npm test` roda os testes determinísticos; `npm run bench -- --label nova --out bench.json` roda o benchmark ponta a ponta com o Ollama sobre `tests/fixtures/Base_RAG_Verdanis.md`.
+## Testes
+
+Tudo em containers (o serviço `tests` usa a imagem com dependências de desenvolvimento):
+
+```bash
+docker compose --profile test run --rm --no-deps tests npm run test:unit   # determinísticos (chunking, registros, memória…)
+docker compose --profile test run --rm tests npm run test:integration       # integração REAL: Qdrant do Compose + Ollama do Windows
+docker compose --profile test run --rm tests npm run bench -- --label qdrant # benchmark ponta a ponta (39 perguntas com gabarito)
+bash scripts/e2e.sh                                                          # API HTTP da aplicação no ar, inclusive reinício dos containers
+```
+
+Os testes de integração e o benchmark usam collections temporárias (`it_*`, `bench_*`) e SQLite temporário, sem tocar nos dados da aplicação. Cobrem: criação e configuração da collection (denso, esparso, INT8, índices), ingestão com IDs consistentes, payload sem texto, buscas densa/esparsa/por código/isolamento por notebook, pipeline completo com o LLM, reprocessamento idempotente, atualização, exclusão, Ollama indisponível, falha parcial, Qdrant indisponível (exclusão adiada), órfãos, mensagens salvas, troca de modelo e reconstrução total do índice.
 
 ## Uso
 
-Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV, TXT, Markdown, JSON, código, HTML/XML e imagens PNG/JPG/WebP/BMP/TIFF) ou texto colado e aguarde o estado `processed`. É possível selecionar vários arquivos por envio (até 50), cada um de até 100 MB por padrão. Documentos com erro podem ser reprocessados pela interface. Abra uma conversa e pergunte; a primeira troca gera automaticamente um título curto para a conversa. Mensagens salvas podem ser abertas para leitura e também são indexadas como contexto do notebook; remover uma mensagem da lista de salvas não apaga a mensagem original da conversa. A resposta inclui trechos-fontes recuperados. Conversas, documentos e vetores permanecem após reiniciar o servidor. Excluir documento remove seus chunks/vetores e tenta remover o arquivo original; excluir notebook remove seus dados associados.
+Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV, TXT, Markdown, JSON, código, HTML/XML e imagens PNG/JPG/WebP/BMP/TIFF) ou texto colado e aguarde o estado `processed`. É possível selecionar vários arquivos por envio (até 50), cada um de até 100 MB por padrão. Documentos com erro podem ser reprocessados pela interface. Abra uma conversa e pergunte; a primeira troca gera automaticamente um título curto para a conversa. Mensagens salvas podem ser abertas para leitura e também são indexadas como contexto do notebook; remover uma mensagem da lista de salvas não apaga a mensagem original da conversa. A resposta inclui trechos-fontes recuperados. Conversas, documentos e vetores permanecem após reiniciar os containers. Excluir documento remove seus trechos (SQLite), pontos (Qdrant) e o arquivo original; excluir notebook remove seus dados associados nos dois bancos.
 
 ## Modo de voz
 
@@ -66,7 +143,7 @@ Tudo roda localmente no servidor com [sherpa-onnx](https://github.com/k2-fsa/she
 - **Captura:** pré-gravação de 0,6 s (não corta o início da fala), volume normalizado antes da transcrição e filtro de ruído do navegador opcional. Em **Voz e efeitos**, "Revisar o texto antes de enviar" permite corrigir o que foi entendido, e o botão de alto-falante ao lado da pergunta toca exatamente o áudio enviado à transcrição (para saber se o problema é o microfone ou o modelo).
 - **Voz:** Piper (VITS) pt-BR — Faber, Cadu ou Jeff — e britânica (Alan ou Northern) para respostas em inglês; ~0,1–0,3 s por frase. Números, moeda, datas e horas são normalizados antes da síntese.
 
-Na primeira abertura os modelos são baixados do Hugging Face para `VOICE_DIR` (`./data/voice`; ~740 MB, com progresso na tela). Para baixar antes: `npm run voice:download` (ou `npm run voice:download -- cadu alan`). Com Parakeet, o modo de voz ocupa ~1 GB de RAM depois de aberto pela primeira vez. **O navegador só libera o microfone em HTTPS ou em `http://localhost`**: para acessar pela rede, use um proxy com TLS. Variáveis: `VOICE_ENABLED`, `VOICE_DIR`, `VOICE_STT_MODEL`, `VOICE_STT_LANGUAGE` (só Whisper), `VOICE_NUM_THREADS`, `VOICE_HF_URL` (espelho do Hugging Face).
+Na primeira abertura os modelos são baixados do Hugging Face para `VOICE_DIR` (`APP_DATA_DIR/voice`, no volume `app/`; ~740 MB, com progresso na tela). Com Parakeet, o modo de voz ocupa ~1 GB de RAM depois de aberto pela primeira vez. **O navegador só libera o microfone em HTTPS ou em `http://localhost`**: para acessar pela rede, use um proxy com TLS. Variáveis: `VOICE_ENABLED`, `VOICE_DIR`, `VOICE_STT_MODEL`, `VOICE_STT_LANGUAGE` (só Whisper), `VOICE_NUM_THREADS`, `VOICE_HF_URL` (espelho do Hugging Face).
 
 ## API
 
@@ -77,11 +154,12 @@ Na primeira abertura os modelos são baixados do Hugging Face para `VOICE_DIR` (
 - `GET /api/conversations/:id/messages`, `POST /api/conversations/:id/messages` (`content`)
 - `GET/POST /api/ai/providers`, `PUT/DELETE /api/ai/providers/:id`, `POST /api/ai/providers/:id/test`, `POST /api/ai/models`
 - `GET /api/ai/status`, `PUT /api/ai/active` (`{chat, embedding}` com ids de provedores)
+- `GET /healthz` (sem login; `?live=1` só o processo), `GET /api/system/info` (inclui `vectorStore`), `GET/POST /api/system/sync` (último relatório / executa a reconciliação SQLite ↔ Qdrant)
 - `GET /api/voice/status`, `POST /api/voice/prepare` (`{voice, voiceEn}`: baixa/carrega os modelos), `POST /api/voice/transcribe` (PCM 16 bits, 16 kHz, mono → `{text}`), `POST /api/voice/speak` (`{text, voice, voiceEn, speed}` → WAV)
 
 ## Notas
 
-OCR local de imagens é feito com Tesseract.js, pré-processando rotação, escala, contraste e nitidez. Português e inglês são reconhecidos juntos por padrão (`OCR_LANG=por+eng`; também aceita `por` ou `eng`). A recuperação e as respostas aceitam português e inglês; o idioma da resposta acompanha o idioma da pergunta. PDFs escaneados não são convertidos automaticamente para imagens e, portanto, precisam de OCR externo ou ser enviados como imagens. Os limites podem ser ajustados por `MAX_FILE_SIZE_MB` e o máximo de arquivos por envio é 50. Cada documento é indexado individualmente e cada busca consulta somente o notebook ativo; a conversa não injeta o histórico inteiro ao modelo, limitando o contexto para proteger máquinas modestas. Docker não é obrigatório: Node.js 22.13+ pode rodar diretamente no servidor.
+OCR local de imagens é feito com Tesseract.js, pré-processando rotação, escala, contraste e nitidez. Português e inglês são reconhecidos juntos por padrão (`OCR_LANG=por+eng`; também aceita `por` ou `eng`). A recuperação e as respostas aceitam português e inglês; o idioma da resposta acompanha o idioma da pergunta. PDFs escaneados não são convertidos automaticamente para imagens e, portanto, precisam de OCR externo ou ser enviados como imagens. Os limites podem ser ajustados por `MAX_FILE_SIZE_MB` e o máximo de arquivos por envio é 50. Cada documento é indexado individualmente e cada busca consulta somente o notebook ativo; a conversa não injeta o histórico inteiro ao modelo, limitando o contexto para proteger máquinas modestas.
 
 ## Configurações de IA
 
@@ -89,7 +167,9 @@ A tela **Configurações** (engrenagem no topo) cadastra, edita, lista e remove 
 
 Em **IA em uso** escolha qual cadastro responde o chat e qual gera os embeddings (podem ser o mesmo servidor ou servidores diferentes). O botão **Buscar modelos** lista os modelos do provedor e **Testar** faz uma chamada real. As chaves ficam no SQLite do servidor e nunca são devolvidas ao navegador (só os 4 últimos caracteres).
 
-**Trocar o modelo de embeddings exige reprocessar os documentos e reindexar as mensagens salvas**, pois vetores de modelos diferentes não são comparáveis.
+O servidor do `.env` (`OLLAMA_BASE_URL`, `OLLAMA_LLM_MODEL`, `OLLAMA_EMBEDDING_MODEL`) aparece como **Ollama (Windows)**, é atualizado a cada inicialização e ocupa os slots vazios. Antes de cada inferência a aplicação confere (com cache curto) se o servidor responde e se o modelo está instalado; se não, a mensagem diz qual modelo baixar no Windows.
+
+**Trocar o modelo de embeddings exige "Reindexar"** (documentos e mensagens salvas), pois vetores de modelos diferentes não são comparáveis; as perguntas avisam enquanto isso não for feito.
 
 ## Ajuste automático ao modelo local
 
@@ -101,7 +181,7 @@ Antes de aceitar conexões, o servidor analisa o PC e se ajusta a ele ([src/tuni
 
 1. Detecta CPU (núcleos físicos e lógicos), RAM e GPU.
 2. Mede, com o modelo de chat ativo, a velocidade do Ollama com algumas quantidades de threads (metade, 75%, núcleos − 1 e todos os núcleos físicos, refinando em volta da melhor) e escolhe a de menor tempo estimado de resposta (leitura do prompt + geração). Empates ficam com menos threads, deixando CPU para o app. Se o modelo roda inteiro na GPU, as threads não importam e a medição é pulada.
-3. Guarda o resultado em `data/tuning.json` (por CPU, RAM, servidor, versão do Ollama e modelo): só a 1ª inicialização de cada PC/modelo mede (20 s a 2 min); as seguintes usam o valor salvo. `npm run tune` mede de novo; trocar o modelo em Configurações mede/aplica em segundo plano.
+3. Guarda o resultado em `APP_DATA_DIR/tuning.json` (volume `app/`), por CPU, RAM, servidor, versão do Ollama e modelo: só a 1ª inicialização de cada PC/modelo mede (20 s a 2 min); as seguintes usam o valor salvo. Apagar o arquivo e reiniciar mede de novo; trocar o modelo em Configurações mede/aplica em segundo plano.
 4. Pré-carrega embeddings e chat com as mesmas opções das perguntas (`num_ctx` e `num_thread` iguais, então o Ollama não recarrega): a 1ª pergunta já não paga a carga do modelo.
 5. Avisa no log quando a GPU está ociosa (Ollama só na CPU) ou quando chat e embeddings se expulsam da memória a cada pergunta.
 
@@ -124,12 +204,12 @@ Medições no Ryzen 7 7735U (8 núcleos, 32 GB), prompt típico do RAG (~1200–
 - **Memória de conversa** (pensada para modelos de 1–4B): perguntas de acompanhamento viram autônomas antes da busca em todos os tamanhos de modelo, inclusive 1B/1.5B. Com pronome ou "e …", o código do item de que se falava é herdado da pergunta ou da resposta anterior sem chamar o LLM ("e o patrocinador dele?" → "e o patrocinador dele (PRJ-ARARA)?"); pedidos como "explique melhor" reaproveitam o assunto anterior; só os casos sem pista são reescritos pelo LLM (do 3B em diante, com validação dos códigos). Os turnos anteriores entram no prompt só do 3B em diante e só em perguntas de acompanhamento (mudança de assunto não paga tokens de histórico); recusas anteriores ficam de fora. `HISTORY_MESSAGES` e `HISTORY_MAX_CHARS` limitam essa janela.
 - **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" amostram trechos de todos os documentos em vez de buscar por similaridade.
 - **Precisão**: corte relativo de trechos fracos (< 80% do melhor), prompt mais curto e restritivo, `temperature=0.1` e `repeat_penalty`.
-- **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`, preenchido automaticamente em bases existentes) e `keep_alive=30m` no Ollama, evitando recarregar modelos entre embedding e chat.
+- **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`), uma única requisição em lote ao Qdrant por busca, textos buscados em lote no SQLite, conexões HTTP reaproveitadas e `keep_alive=30m` no Ollama, evitando recarregar modelos entre embedding e chat.
 
 ## Recuperação híbrida
 
-- **Busca híbrida**: BM25 (com stemming leve para português) + similaridade vetorial, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings.
-- **Índice em memória** por notebook, invalidado automaticamente quando documentos mudam: as perguntas deixam de reler e reprocessar o SQLite.
+- **Busca híbrida no Qdrant**: BM25 (vetores esparsos com stemming leve para português, IDF do Qdrant) + similaridade vetorial densa, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings. Detalhes em [Arquitetura de recuperação](#arquitetura-de-recuperação).
+- **Sem índice em memória**: a memória da aplicação não cresce com o volume de documentos; os vetores ficam no Qdrant (INT8 na RAM, originais em disco).
 - **Portão de relevância**: trecho sem nenhum termo em comum com a pergunta só entra se se destacar estatisticamente dos demais (z-score). Perguntas fora do assunto dos documentos são recusadas sem gastar uma chamada ao modelo de chat.
 - **Trechos vizinhos** (`NEIGHBOR_EXPAND_TOP`): os melhores resultados ganham os trechos adjacentes, e trechos contíguos viram uma passagem única, sem repetir o overlap.
 - **Prefixos de embedding**: `nomic-embed-text` (`search_query:`/`search_document:`) e modelos `e5` (`query:`/`passage:`) usam os prefixos para os quais foram treinados. **Reprocesse os documentos** ao adotar esta versão com esses modelos.

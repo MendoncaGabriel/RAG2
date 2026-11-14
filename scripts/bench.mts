@@ -12,12 +12,16 @@ const src = path.resolve(arg("src", path.join(root, "src")));
 const label = arg("label", path.basename(path.dirname(src)));
 const out = arg("out", "");
 const only = arg("only", "").split(",").filter(Boolean);
-const chatModel = process.env.BENCH_CHAT_MODEL || "qwen2.5:3b", embeddingModel = process.env.BENCH_EMBED_MODEL || "bge-m3";
-const ollama = process.env.BENCH_OLLAMA_URL || "http://localhost:11434";
+const chatModel = process.env.BENCH_CHAT_MODEL || process.env.OLLAMA_LLM_MODEL || "qwen3:1.7b", embeddingModel = process.env.BENCH_EMBED_MODEL || process.env.OLLAMA_EMBEDDING_MODEL || "bge-m3";
+const ollama = process.env.BENCH_OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-bench-"));
-process.env.DATABASE_PATH = path.join(tmp, "bench.sqlite");
+process.env.SQLITE_PATH = path.join(tmp, "bench.sqlite");
+process.env.APP_DATA_DIR = tmp;
 process.env.UPLOAD_DIR = path.join(tmp, "uploads");
+// Collection própria e temporária no Qdrant (QDRANT_URL/QDRANT_API_KEY do ambiente): não toca nos dados da aplicação.
+const benchCollection = `bench_${Date.now()}`;
+process.env.QDRANT_COLLECTION = benchCollection;
 const load = (m: string) => import(pathToFileURL(path.join(src, m)).href);
 const { db } = await load("database.ts");
 const ai = await load("ai.ts");
@@ -122,5 +126,6 @@ console.log(`\n[${label}] acerto ${pct(summary.accuracy)} · P@K ${pct(summary.p
 console.log(`[${label}] tempo médio: busca ${summary.avgRetrievalMs}ms · geração ${summary.avgGenerationMs}ms · total ${summary.avgTotalMs}ms (p95 ${summary.p95TotalMs}ms) · RSS ${summary.rssMB} MB · Ollama ${summary.ollamaLoadedMB ?? "-"} MB`);
 console.log(`[${label}] por categoria: ${JSON.stringify(byCat)} · simultâneas: ${JSON.stringify(concurrent)}`);
 if (out) fs.writeFileSync(out, JSON.stringify({ summary, results }, null, 2));
+try { await (await load("qdrant.ts")).deleteCollection(benchCollection); } catch {}
 try { db.close(); fs.rmSync(tmp, { recursive: true, force: true }); } catch {} // Windows: o SQLite aberto impede apagar a pasta
 process.exit(0);

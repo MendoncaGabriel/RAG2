@@ -6,11 +6,11 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "tsx watch --use-system-ca src/server.ts",
     "build": "tsc",
-    "start": "node --use-system-ca dist/server.js",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.mts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.mts tests/integration/*.test.mts",
+    "test:unit": "node --import tsx --test tests/*.test.mts",
+    "test:integration": "node --import tsx --test --test-concurrency=1 tests/integration/*.test.mts",
     "bench": "tsx scripts/bench.mts",
     "tune": "tsx --use-system-ca scripts/tune.mts",
     "voice:download": "tsx --use-system-ca scripts/voice-download.mts"

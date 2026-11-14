@@ -2,38 +2,20 @@ import crypto from "node:crypto";
 import { db } from "./database.js";
 import { activeProvider, cachedModelInfo, chat, embedMany, refreshModelInfo } from "./ai.js";
 import { deriveProfile, isCompact } from "./modelprofile.js";
-import { isTocChunk, splitProse } from "./chunking.js";
 import { analyzeQuery, extractCodes, structuredQuery, type QueryIntent, type Source } from "./structured.js";
+import { normalizeText, stemTokens, stopWords } from "./sparse.js";
+import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel } from "./indexing.js";
+import { QdrantError } from "./qdrant.js";
 
-export { embedMany };
-export const normalizeText = (text: string) => text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
-// Compatibilidade: divisão simples por caracteres (o processamento de documentos usa chunkStructured).
-export const chunkText = (text: string): string[] => splitProse(text);
+export { normalizeText };
 
-const stopWords = new Set(["com", "como", "mais", "menos", "para", "pela", "pelo", "que", "qual", "quais", "quando", "onde", "porque", "sobre", "seus", "suas", "este", "esta", "isso", "essa", "resumidamente", "brevemente", "resumo", "resuma", "resumir", "explique", "defina", "diga", "fale", "simples", "curto", "briefly", "shortly", "summarize", "explain", "the", "and", "for", "from", "what", "when", "where", "which", "this", "that", "with"]);
 function searchTerms(text: string): Set<string> {
-  return new Set(text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().match(/[\p{L}\p{N}]{3,}/gu)?.filter(term => !stopWords.has(term)) || []);
+  return new Set(normalizeText(text).match(/[\p{L}\p{N}]{3,}/gu)?.filter(term => !stopWords.has(term)) || []);
 }
-function countMatchedTerms(normalizedContent: string, terms: Set<string>): number {
-  if (!terms.size) return 0;
-  const found = new Set<string>();
-  const tokens = normalizedContent.matchAll(/[\p{L}\p{N}]{3,}/gu);
-  for (const [term] of tokens) {
-    if (terms.has(term)) {
-      found.add(term);
-      if (found.size === terms.size) break;
-    }
-  }
-  return found.size;
-}
-export async function ensureSavedMessageEmbeddings(notebookId: string) {
-  const pending = db.prepare("SELECT s.id,m.content FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? AND s.embedding IS NULL").all(notebookId) as { id: string; content: string }[];
-  const update = db.prepare("UPDATE saved_messages SET embedding=?,dimensions=? WHERE id=? AND embedding IS NULL");
-  for (let start = 0; start < pending.length; start += 16) {
-    const batch = pending.slice(start, start + 16);
-    const vectors = await embedMany(batch.map(row => row.content));
-    vectors.forEach((vector, index) => update.run(Buffer.from(new Float32Array(vector).buffer), vector.length, batch[index].id));
-  }
+// Mensagens salvas pendentes entram no Qdrant antes da busca; falha não impede a pergunta (fica o aviso na mensagem salva).
+async function indexSavedSafely(notebookId: string) {
+  try { await indexSavedMessages(notebookId); }
+  catch (e) { db.prepare("UPDATE saved_messages SET index_error=? WHERE notebook_id=? AND indexed=0").run((e instanceof Error ? e.message : String(e)).slice(0, 300), notebookId); }
 }
 export type HistoryMessage = { role: string; content: string };
 export type AskOptions = { history?: HistoryMessage[]; onToken?: (token: string) => void; onSources?: (sources: any[]) => void; signal?: AbortSignal; detailed?: boolean; creative?: boolean };
@@ -172,51 +154,21 @@ function summarySample(notebookId: string, limit: number) {
   return out;
 }
 
-// ---------- Recuperação híbrida (BM25 + vetores) com índice em memória por notebook ----------
-// Stemming leve (prefixo de 6 letras sem "s" final): "interações"/"interação", "computadores"/"computador".
-const stem = (term: string) => term.replace(/s$/, "").slice(0, 6);
-function stemTokens(normalizedText: string): string[] {
-  return (normalizedText.match(/[\p{L}\p{N}]{3,}/gu) || []).filter(term => !stopWords.has(term)).map(stem);
-}
-type IndexRow = { id: string; content: string; text: string; section: string | null; codes: Set<string>; document_id: string | null; document_name: string; created_at: string | null; chunk_index: number; source_type: string; vec: Float32Array; invNorm: number; tf: Map<string, number>; len: number; toc: boolean };
-type NotebookIndex = { signature: string; rows: IndexRow[]; df: Map<string, number>; avgLen: number };
-const indexCache = new Map<string, NotebookIndex>();
-const MAX_CACHED_NOTEBOOKS = 8;
-// A assinatura do índice não detecta tudo (ex.: apagar e salvar outra mensagem com o mesmo tamanho); alterações em mensagens salvas descartam o cache do notebook.
-export const invalidateIndex = (notebookId: string) => { indexCache.delete(notebookId); };
-
-function indexSignature(notebookId: string): string {
-  const c = db.prepare("SELECT count(*) AS n, coalesce(max(c.rowid),0) AS m FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.notebook_id=? AND d.status='processed'").get(notebookId) as { n: number; m: number };
-  const s = db.prepare("SELECT count(*) AS n, coalesce(max(rowid),0) AS m, coalesce(sum(length(title)),0) AS t, coalesce(sum(embedding IS NOT NULL),0) AS e FROM saved_messages WHERE notebook_id=?").get(notebookId) as { n: number; m: number; t: number; e: number };
-  return `${c.n}:${c.m}:${s.n}:${s.m}:${s.t}:${s.e}`;
-}
-function loadIndex(notebookId: string): NotebookIndex {
-  const signature = indexSignature(notebookId);
-  const cached = indexCache.get(notebookId);
-  if (cached && cached.signature === signature) return cached;
-  const documentQuery = db.prepare("SELECT c.id,c.content,c.search_text,c.section,c.embedding,c.dimensions,c.document_id,d.name AS document_name,d.created_at,c.chunk_index,'document' AS source_type FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.notebook_id=? AND d.status='processed'");
-  const savedQuery = db.prepare("SELECT s.message_id AS id,m.content,NULL AS search_text,NULL AS section,s.created_at,s.embedding,s.dimensions,NULL AS document_id,('Mensagem salva: ' || s.title) AS document_name,0 AS chunk_index,'saved_message' AS source_type FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? AND s.embedding IS NOT NULL");
-  const rows: IndexRow[] = [], df = new Map<string, number>();
-  let totalLen = 0;
-  const add = (r: any) => {
-    const view = new Float32Array(r.embedding.buffer, r.embedding.byteOffset, r.dimensions);
-    const vec = Float32Array.from(view);
-    let norm = 0; for (let i = 0; i < vec.length; i++) norm += vec[i] * vec[i];
-    const text = r.search_text ?? normalizeText(r.content);
-    const tokens = stemTokens(text);
-    const tf = new Map<string, number>();
-    for (const token of tokens) tf.set(token, (tf.get(token) || 0) + 1);
-    for (const token of tf.keys()) df.set(token, (df.get(token) || 0) + 1);
-    totalLen += tokens.length;
-    rows.push({ id: r.id, content: r.content, text, section: r.section ?? null, codes: new Set(extractCodes(r.content)), document_id: r.document_id, document_name: r.document_name, created_at: r.created_at ?? null, chunk_index: r.chunk_index, source_type: r.source_type, vec, invNorm: 1 / (Math.sqrt(norm) || 1), tf, len: tokens.length, toc: isTocChunk(r.content) });
-  };
-  for (const r of documentQuery.iterate(notebookId) as Iterable<any>) add(r);
-  for (const r of savedQuery.iterate(notebookId) as Iterable<any>) add(r);
-  const index = { signature, rows, df, avgLen: totalLen / Math.max(1, rows.length) || 1 };
-  indexCache.delete(notebookId);
-  indexCache.set(notebookId, index);
-  while (indexCache.size > MAX_CACHED_NOTEBOOKS) indexCache.delete(indexCache.keys().next().value!);
-  return index;
+// ---------- Recuperação híbrida no Qdrant (denso + BM25 esparso, fusão RRF) ----------
+// O Qdrant devolve IDs e pontuações; textos e metadados vêm do SQLite em lote. O ranqueamento final (RRF ponderado pela
+// cobertura dos termos, códigos exatos, período citado, z-score da similaridade) é o mesmo da versão em memória.
+type Candidate = { id: string; content: string; text: string; section: string | null; page: number | null; document_id: string | null; document_name: string; created_at: string | null; chunk_index: number; source_type: string };
+// Textos e metadados dos pontos devolvidos pelo Qdrant, em lote, só de documentos já processados. Pontos sem linha no SQLite
+// (órfãos, documentos em reprocessamento) são ignorados. A chave é o ID do ponto; o id de mensagem salva é o da mensagem.
+function loadCandidates(pointIds: string[]): Map<string, Candidate> {
+  const out = new Map<string, Candidate>();
+  for (let i = 0; i < pointIds.length; i += 500) {
+    const part = pointIds.slice(i, i + 500), marks = part.map(() => "?").join(",");
+    for (const r of db.prepare(`SELECT c.id,c.content,c.search_text AS text,c.section,c.page_start AS page,c.document_id,d.name AS document_name,d.created_at,c.chunk_index,'document' AS source_type FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.id IN (${marks}) AND d.status='processed'`).all(...part) as Candidate[]) out.set(r.id, r);
+    for (const r of db.prepare(`SELECT s.id AS point_id,s.message_id AS id,m.content,s.created_at,('Mensagem salva: ' || s.title) AS document_name FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.id IN (${marks})`).all(...part) as any[])
+      out.set(r.point_id, { id: r.id, content: r.content, text: normalizeText(r.content), section: null, page: null, document_id: null, document_name: r.document_name, created_at: r.created_at, chunk_index: 0, source_type: "saved_message" });
+  }
+  return out;
 }
 
 // Perguntas de definição ("o que é o Hefesto?") costumam ser respondidas pela introdução do documento.
@@ -224,62 +176,51 @@ const definitionIntent = /^\s*(o que (e|sao|significa|faz)|que e|quem (e|sao)|de
 
 // relaxed: segunda tentativa quando a busca estrita não achou nada. Aceita trechos semanticamente próximos sem exigir que se
 // destaquem do resto do notebook; o modelo recebe o contexto e decide se responde ou recusa.
-function hybridSearch(notebookId: string, question: string, queryVectors: number[][], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false) {
-  const index = loadIndex(notebookId), rows = index.rows, n = rows.length;
+async function hybridSearch(notebookId: string, question: string, queryVector: number[], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false) {
   const minRelevance = Number(process.env.MIN_RELEVANCE_SCORE ?? 0.48);
   const threshold = Number.isFinite(minRelevance) ? Math.max(-1, minRelevance) : 0.48;
   const normalizedQuestion = normalizeText(question).trim();
   const queryStems = [...new Set(stemTokens(normalizedQuestion))];
-  const idf = new Map(queryStems.map(term => { const d = index.df.get(term) || 0; return [term, Math.log(1 + (n - d + 0.5) / (d + 0.5))] as const; }));
-  const qInv = queryVectors.map(v => 1 / (Math.sqrt(v.reduce((s, x) => s + x * x, 0)) || 1));
-  const k1 = 1.4, b = 0.75;
-  const sem = new Float32Array(n), bm = new Float32Array(n), cov = new Float32Array(n), codeHit = new Float32Array(n), temporal = new Float32Array(n);
   // Códigos exatos (PRJ-ARARA, APP-MES) não podem ser trocados por um trecho apenas "parecido": casamento exato vem primeiro.
   const codes = intent.codes;
   const temporalTerms = [...new Set(intent.temporal)];
-  let incompatible = false;
-  for (let r = 0; r < n; r++) {
-    const row = rows[r];
-    let best = -1, original = -1;
-    for (let q = 0; q < queryVectors.length; q++) {
-      const v = queryVectors[q];
-      if (v.length !== row.vec.length) { incompatible = true; best = -2; break; }
-      let dot = 0; for (let i = 0; i < v.length; i++) dot += v[i] * row.vec[i];
-      const sim = dot * qInv[q] * row.invNorm;
-      if (q === 0) original = sim; else best = Math.max(best, sim * 0.85);
-    }
-    sem[r] = best === -2 ? -1 : Math.max(original, best);
-    let score = 0, matched = 0;
-    for (const term of queryStems) {
-      const f = row.tf.get(term);
-      if (!f) continue;
-      matched++;
-      score += idf.get(term)! * (f * (k1 + 1)) / (f + k1 * (1 - b + b * row.len / index.avgLen));
-    }
-    bm[r] = score;
+  const pool = Math.max(30, topK * 6);
+  const found = await searchCandidates(notebookId, queryVector, queryStems, codes, pool);
+  const pointIds = [...new Set([...found.dense, ...found.sparse, ...found.code].map(p => String(p.id)))];
+  const byPoint = loadCandidates(pointIds);
+  const ids = pointIds.filter(id => byPoint.has(id)), rows = ids.map(id => byPoint.get(id)!), n = rows.length, at = new Map(ids.map((id, i) => [id, i]));
+  // Similaridade densa de cada candidato: das listas densa/código; os que vieram só da lista lexical são pontuados à parte.
+  const semOf = new Map<string, number>();
+  for (const p of [...found.dense, ...found.code]) semOf.set(String(p.id), p.score);
+  const missing = ids.filter(id => !semOf.has(id));
+  for (const [id, s] of await denseScores(notebookId, queryVector, missing)) semOf.set(id, s);
+  const sem = new Float32Array(n), cov = new Float32Array(n), codeHit = new Float32Array(n), temporal = new Float32Array(n), lexical = new Uint8Array(n);
+  rows.forEach((row, r) => {
+    sem[r] = semOf.get(ids[r]) ?? -1;
+    const stems = new Set(stemTokens(row.text));
+    const matched = queryStems.filter(t => stems.has(t)).length;
+    lexical[r] = matched > 0 ? 1 : 0;
     cov[r] = queryStems.length ? matched / queryStems.length : 0;
-    if (codes.length) codeHit[r] = codes.filter(c => row.codes.has(c)).length / codes.length;
+    if (codes.length) { const own = new Set(extractCodes(row.content)); codeHit[r] = codes.filter(c => own.has(c)).length / codes.length; }
     if (temporalTerms.length) temporal[r] = Math.min(2, temporalTerms.filter(t => row.text.includes(t)).length);
-  }
-  // Fusão por rank (RRF): combina as duas listas sem depender da escala de cada pontuação.
-  // Sumários (trechos de pontilhado até o número da página) ficam de fora: concentram palavras-chave e não respondem nada.
-  const pool = Math.max(30, topK * 6), rrf = new Float32Array(n);
-  const all = Array.from({ length: n }, (_, i) => i).filter(i => !rows[i].toc || codeHit[i] > 0);
-  all.filter(i => sem[i] > -1).sort((a, c) => sem[c] - sem[a]).slice(0, pool).forEach((i, rank) => { rrf[i] += 1 / (60 + rank); });
+  });
+  // Fusão por rank (RRF) das listas do Qdrant: combina as duas sem depender da escala de cada pontuação.
+  // Sumários (trechos de pontilhado até o número da página) já vêm fora das listas: concentram palavras-chave e não respondem nada.
+  const rrf = new Float32Array(n);
+  found.dense.map(p => at.get(String(p.id))).filter((i): i is number => i !== undefined).forEach((i, rank) => { rrf[i] += 1 / (60 + rank); });
   // O voto lexical pesa pela fração dos termos da pergunta que o trecho contém: casar uma palavra solta ("backend", "sistema")
   // não empurra o trecho para cima. Importa em documentos em outro idioma (pergunta em português, PDF em inglês), em que só
   // termos soltos coincidem; quando o trecho tem todos os termos, o peso é o mesmo de antes.
-  all.filter(i => bm[i] > 0).sort((a, c) => bm[c] - bm[a]).slice(0, pool).forEach((i, rank) => { rrf[i] += Math.min(1, 0.25 + cov[i]) / (60 + rank); });
+  found.sparse.map(p => at.get(String(p.id))).filter((i): i is number => i !== undefined).forEach((i, rank) => { rrf[i] += Math.min(1, 0.25 + cov[i]) / (60 + rank); });
   // Cosseno absoluto não separa "relacionado" de "qualquer coisa" em todos os modelos; o z-score contra o
-  // restante do notebook sim. Sem apoio lexical, o trecho precisa se destacar dos demais.
-  let mean = 0, variance = 0;
-  for (let i = 0; i < n; i++) mean += sem[i];
-  mean /= Math.max(1, n);
-  for (let i = 0; i < n; i++) variance += (sem[i] - mean) ** 2;
-  const std = Math.sqrt(variance / Math.max(1, n)) || 1;
+  // restante do notebook sim. Média e desvio vêm da amostra aleatória do notebook (exata até 256 trechos).
+  const sample = found.sample, total = sample.length;
+  const mean = sample.reduce((s, x) => s + x, 0) / Math.max(1, total);
+  const std = Math.sqrt(sample.reduce((s, x) => s + (x - mean) ** 2, 0) / Math.max(1, total)) || 1;
   const zOf = (i: number) => (sem[i] - mean) / std;
+  const all = rows.map((_, i) => i);
   const supported = relaxed
-    ? (i: number) => codeHit[i] > 0 || sem[i] >= threshold - 0.08 || (bm[i] > 0 && cov[i] >= 0.34)
+    ? (i: number) => codeHit[i] > 0 || sem[i] >= threshold - 0.08 || (lexical[i] > 0 && cov[i] >= 0.34)
     : (i: number) => codeHit[i] > 0 || (sem[i] >= threshold && (cov[i] >= 0.34 || (n >= 6 ? zOf(i) >= 1.3 : sem[i] >= 0.65)));
   const combined = (i: number) => sem[i] + cov[i] * 0.2 + codeHit[i] * 0.25 + temporal[i] * 0.06 + (normalizedQuestion.length >= 8 && rows[i].text.includes(normalizedQuestion) ? 0.08 : 0);
   // Definição: introdução (2 primeiros trechos) do documento que cita o termo sobe no ranking (~meia posição de RRF).
@@ -288,11 +229,11 @@ function hybridSearch(notebookId: string, question: string, queryVectors: number
   // Ordenação: casamento exato de código domina; período citado (mês/ano) desempata a favor do trecho histórico certo.
   const key = (i: number) => codeHit[i] + rrf[i] + temporal[i] * 0.004 + intro(i);
   const candidates = all
-    .filter(i => (rrf[i] > 0 || codeHit[i] > 0) && (supported(i) || (bm[i] > 0 && cov[i] >= 0.6)))
+    .filter(i => (rrf[i] > 0 || codeHit[i] > 0) && (supported(i) || (lexical[i] > 0 && cov[i] >= 0.6)))
     .sort((a, c) => key(c) - key(a)).slice(0, topK);
   const top = Math.max(-1, ...candidates.map(combined));
   const scored = candidates.filter(i => combined(i) >= top * 0.6).map(i => ({ ...rows[i], score: combined(i) }));
-  return { scored, incompatible: incompatible && !scored.length };
+  return { scored };
 }
 
 function joinOverlap(a: string, b: string): string {
@@ -536,21 +477,35 @@ export async function ask(notebookId: string, question: string, options: AskOpti
     scored = summarySample(notebookId, Math.min(10, topK + 2));
     summaryMode = true;
   } else {
-    await ensureSavedMessageEmbeddings(notebookId);
-    const queryVectors = await embedQueries([retrievalQuestion]);
-    let found = hybridSearch(notebookId, retrievalQuestion, queryVectors, effectiveTopK, intent);
-    if (found.incompatible) return { answer: "O modelo de embeddings atual é diferente do usado para indexar estes documentos. Clique em 'Reindexar' na seção Documentos para recalcular os vetores com o novo modelo.", sources: [] };
-    // Modelos pequenos às vezes reescrevem mal a pergunta de acompanhamento: sem resultado, tenta a pergunta original.
-    if (!found.scored.length && retrievalQuestion !== question) {
-      found = hybridSearch(notebookId, question, await embedQueries([question]), effectiveTopK, analyzeQuery(question));
-      if (found.scored.length) console.info("[RAG] reescrita sem resultado; usada a pergunta original");
+    // Vetores de outro modelo de embeddings não são comparáveis com a pergunta: só a reindexação resolve.
+    const incompatibleMessage = { answer: "O modelo de embeddings atual é diferente do usado para indexar estes documentos. Clique em 'Reindexar' na seção Documentos para recalcular os vetores com o novo modelo.", sources: [] };
+    const model = activeEmbeddingModel(), indexed = vectorModel();
+    if (indexed && model && indexed !== model) return incompatibleMessage;
+    const stale = (db.prepare("SELECT count(*) AS n FROM documents WHERE notebook_id=? AND status='processed' AND embedding_model IS NOT ?").get(notebookId, model) as { n: number }).n;
+    await indexSavedSafely(notebookId);
+    const [queryVector] = await embedQueries([retrievalQuestion]);
+    try {
+      let found = await hybridSearch(notebookId, retrievalQuestion, queryVector, effectiveTopK, intent);
+      // Modelos pequenos às vezes reescrevem mal a pergunta de acompanhamento: sem resultado, tenta a pergunta original.
+      if (!found.scored.length && retrievalQuestion !== question) {
+        found = await hybridSearch(notebookId, question, (await embedQueries([question]))[0], effectiveTopK, analyzeQuery(question));
+        if (found.scored.length) console.info("[RAG] reescrita sem resultado; usada a pergunta original");
+      }
+      // Ainda vazio: busca relaxada com poucos trechos. O modelo recebe o contexto e decide se responde ou recusa.
+      if (!found.scored.length) {
+        found = await hybridSearch(notebookId, retrievalQuestion, queryVector, Math.min(3, effectiveTopK), intent, true);
+        if (found.scored.length) console.info(`[RAG] busca relaxada: ${found.scored.length} trecho(s)`);
+      }
+      scored = found.scored;
+    } catch (e) {
+      // Collection ausente (volume do Qdrant apagado): a reconciliação reconstrói o índice a partir do SQLite.
+      if (e instanceof QdrantError && / 404 /.test(e.message)) {
+        void reconcile();
+        return { answer: "O índice de busca (Qdrant) está sendo reconstruído a partir do banco de documentos. Tente novamente em instantes.", sources: [] };
+      }
+      throw e;
     }
-    // Ainda vazio: busca relaxada com poucos trechos. O modelo recebe o contexto e decide se responde ou recusa.
-    if (!found.scored.length) {
-      found = hybridSearch(notebookId, retrievalQuestion, queryVectors, Math.min(3, effectiveTopK), intent, true);
-      if (found.scored.length) console.info(`[RAG] busca relaxada: ${found.scored.length} trecho(s)`);
-    }
-    scored = found.scored;
+    if (!scored.length && stale) return incompatibleMessage;
   }
   if (!scored.length && structured?.kind !== "records") return { answer: "Não encontrei essa informação nos documentos deste notebook. Só respondo com base no conteúdo anexado; se o assunto está nos documentos, tente reformular a pergunta.", sources: [] };
 
@@ -577,7 +532,7 @@ export async function ask(notebookId: string, question: string, options: AskOpti
     includedItems.push(...p.items);
     used += header.length + Math.min(text.length, remaining) + 2;
   }
-  const toSource = (s: any, i: number): Source => ({ id: s.id, document: s.document_name, type: s.source_type, section: s.section || undefined, excerpt: s.content.slice(0, 600), score: Number(s.score.toFixed(4)), label: `Fonte ${i + 1}` });
+  const toSource = (s: any, i: number): Source => ({ id: s.id, document: s.document_name, type: s.source_type, section: [s.section, s.page ? `p. ${s.page}` : ""].filter(Boolean).join(" · ") || undefined, excerpt: s.content.slice(0, 600), score: Number(s.score.toFixed(4)), label: `Fonte ${i + 1}` });
   const recordSources = structured?.kind === "records" ? structured.sources : [];
   options.onSources?.([...recordSources, ...includedItems.map(toSource)]);
   const t1 = Date.now();
@@ -617,15 +572,3 @@ Pergunta: ${retrievalQuestion}${hint ? `\n\n${hint}` : ""}${"\n\nResponda usando
   return { answer, sources };
 }
 export const uuid = () => crypto.randomUUID();
-
-// Texto normalizado (sem acentos, minúsculo) pré-calculado: evita normalizar todos os trechos a cada pergunta.
-try { db.exec("ALTER TABLE chunks ADD COLUMN search_text TEXT"); } catch {}
-{
-  const pending = db.prepare("SELECT id,content FROM chunks WHERE search_text IS NULL").all() as { id: string; content: string }[];
-  if (pending.length) {
-    const update = db.prepare("UPDATE chunks SET search_text=? WHERE id=?");
-    db.exec("BEGIN");
-    for (const row of pending) update.run(normalizeText(row.content), row.id);
-    db.exec("COMMIT");
-  }
-}
