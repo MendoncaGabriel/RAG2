@@ -6,8 +6,9 @@ import { analyzeQuery, extractCodes, structuredQuery, type QueryIntent, type Sou
 import { normalizeText, stemTokens, stopWords } from "./sparse.js";
 import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel } from "./indexing.js";
 import { QdrantError } from "./qdrant.js";
+import { prepareReranker, rerankCandidates, rerankEnabled, rerankOrder, rerankScores, rerankTopN } from "./rerank.js";
 
-export { normalizeText };
+export { normalizeText, prepareReranker };
 
 function searchTerms(text: string): Set<string> {
   return new Set(normalizeText(text).match(/[\p{L}\p{N}]{3,}/gu)?.filter(term => !stopWords.has(term)) || []);
@@ -176,7 +177,9 @@ const definitionIntent = /^\s*(o que (e|sao|significa|faz)|que e|quem (e|sao)|de
 
 // relaxed: segunda tentativa quando a busca estrita não achou nada. Aceita trechos semanticamente próximos sem exigir que se
 // destaquem do resto do notebook; o modelo recebe o contexto e decide se responde ou recusa.
-async function hybridSearch(notebookId: string, question: string, queryVector: number[], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false) {
+// rerankN > 0: os RERANK_CANDIDATES (25) melhores que passaram no portão de relevância são reordenados pelo Cross-Encoder local
+// (rerank.ts) e só os rerankN primeiros seguem. Sem o modelo pronto, vale a ordem da busca com topK.
+async function hybridSearch(notebookId: string, question: string, queryVector: number[], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false, rerankN = 0) {
   const minRelevance = Number(process.env.MIN_RELEVANCE_SCORE ?? 0.48);
   const threshold = Number.isFinite(minRelevance) ? Math.max(-1, minRelevance) : 0.48;
   const normalizedQuestion = normalizeText(question).trim();
@@ -184,7 +187,7 @@ async function hybridSearch(notebookId: string, question: string, queryVector: n
   // Códigos exatos (PRJ-ARARA, APP-MES) não podem ser trocados por um trecho apenas "parecido": casamento exato vem primeiro.
   const codes = intent.codes;
   const temporalTerms = [...new Set(intent.temporal)];
-  const pool = Math.max(30, topK * 6);
+  const pool = Math.max(30, topK * 6, rerankN ? rerankCandidates() : 0);
   const found = await searchCandidates(notebookId, queryVector, queryStems, codes, pool);
   const pointIds = [...new Set([...found.dense, ...found.sparse, ...found.code].map(p => String(p.id)))];
   const byPoint = loadCandidates(pointIds);
@@ -228,12 +231,23 @@ async function hybridSearch(notebookId: string, question: string, queryVector: n
   const intro = (i: number) => definition && rows[i].source_type === "document" && rows[i].chunk_index <= 1 && cov[i] > 0 ? 0.008 : 0;
   // Ordenação: casamento exato de código domina; período citado (mês/ano) desempata a favor do trecho histórico certo.
   const key = (i: number) => codeHit[i] + rrf[i] + temporal[i] * 0.004 + intro(i);
-  const candidates = all
+  const ranked = all
     .filter(i => (rrf[i] > 0 || codeHit[i] > 0) && (supported(i) || (lexical[i] > 0 && cov[i] >= 0.6)))
-    .sort((a, c) => key(c) - key(a)).slice(0, topK);
+    .sort((a, c) => key(c) - key(a));
+  // Reranking: o Cross-Encoder lê pergunta e trecho juntos e substitui o corte relativo (top * 0,6) da pontuação combinada.
+  if (rerankN > 0 && ranked.length > 1) {
+    const candidates = ranked.slice(0, rerankCandidates()), t0 = Date.now();
+    const scores = await rerankScores(question, candidates.map(i => rows[i].content));
+    if (scores) {
+      const picked = rerankOrder(scores, candidates.map(i => codeHit[i]), rerankN);
+      const scored = picked.map(k => ({ ...rows[candidates[k]], score: combined(candidates[k]), rerank: scores[k] }));
+      return { scored, rerank: { ms: Date.now() - t0, candidates: candidates.length } };
+    }
+  }
+  const candidates = ranked.slice(0, topK);
   const top = Math.max(-1, ...candidates.map(combined));
   const scored = candidates.filter(i => combined(i) >= top * 0.6).map(i => ({ ...rows[i], score: combined(i) }));
-  return { scored };
+  return { scored, rerank: undefined as { ms: number; candidates: number } | undefined };
 }
 
 function joinOverlap(a: string, b: string): string {
@@ -473,6 +487,10 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   // Estratégia adaptativa: perguntas de lista ou com vários códigos recuperam um pouco mais; as demais ficam no top-K do perfil.
   const broad = intent.list || intent.codes.length > 1;
   const effectiveTopK = broad ? Math.min(topK + 2, 8) : topK;
+  // Reranking local: dos 25 candidatos, só os 4 mais relevantes pelo Cross-Encoder vão ao prompt dos modelos compactos
+  // (qwen3:1.7b); do médio em diante, o top-K do perfil (mínimo 4) na ordem do Cross-Encoder. RERANK_TOP_N sobrescreve.
+  const rerankN = rerankEnabled() ? rerankTopN(compact ? 4 : Math.max(4, effectiveTopK)) : 0;
+  let rerankInfo: { ms: number; candidates: number } | undefined;
   if (summaryIntent.test(normalizedQuestion) && topicTerms.length <= 1 && (chunkCount.n || savedCount.n)) {
     scored = summarySample(notebookId, Math.min(10, topK + 2));
     summaryMode = true;
@@ -485,18 +503,19 @@ export async function ask(notebookId: string, question: string, options: AskOpti
     await indexSavedSafely(notebookId);
     const [queryVector] = await embedQueries([retrievalQuestion]);
     try {
-      let found = await hybridSearch(notebookId, retrievalQuestion, queryVector, effectiveTopK, intent);
+      let found = await hybridSearch(notebookId, retrievalQuestion, queryVector, effectiveTopK, intent, false, rerankN);
       // Modelos pequenos às vezes reescrevem mal a pergunta de acompanhamento: sem resultado, tenta a pergunta original.
       if (!found.scored.length && retrievalQuestion !== question) {
-        found = await hybridSearch(notebookId, question, (await embedQueries([question]))[0], effectiveTopK, analyzeQuery(question));
+        found = await hybridSearch(notebookId, question, (await embedQueries([question]))[0], effectiveTopK, analyzeQuery(question), false, rerankN);
         if (found.scored.length) console.info("[RAG] reescrita sem resultado; usada a pergunta original");
       }
       // Ainda vazio: busca relaxada com poucos trechos. O modelo recebe o contexto e decide se responde ou recusa.
       if (!found.scored.length) {
-        found = await hybridSearch(notebookId, retrievalQuestion, queryVector, Math.min(3, effectiveTopK), intent, true);
+        found = await hybridSearch(notebookId, retrievalQuestion, queryVector, Math.min(3, effectiveTopK), intent, true, Math.min(3, rerankN));
         if (found.scored.length) console.info(`[RAG] busca relaxada: ${found.scored.length} trecho(s)`);
       }
       scored = found.scored;
+      rerankInfo = found.rerank;
     } catch (e) {
       // Collection ausente (volume do Qdrant apagado): a reconciliação reconstrói o índice a partir do SQLite.
       if (e instanceof QdrantError && / 404 /.test(e.message)) {
@@ -561,7 +580,7 @@ ${context}
 Pergunta: ${retrievalQuestion}${hint ? `\n\n${hint}` : ""}${"\n\nResponda usando o contexto acima."}${detailed ? "\n\nResponda de forma longa e detalhada, em vários parágrafos: defina, explique como funciona e dê exemplos do contexto." : compact ? "\n\nResponda em no máximo 3 frases curtas." : "\n\nResponda de forma direta e completa, cobrindo todas as partes da pergunta; use uma lista curta quando houver vários itens."}` },
     ],
   }, token => { if (!firstToken) firstToken = Date.now(); options.onToken?.(token); });
-  console.info(`[RAG] perfil ${profile.tier} (${activeProvider("chat")?.chatModel} · ${profile.family} ${Number(profile.sizeB.toFixed(1))}B/${profile.sizeSource} · ctx ${profile.contextTokens} · topK ${effectiveTopK}) · busca ${t1 - t0}ms · 1º token ${firstToken ? firstToken - t1 : "-"}ms · geração ${Date.now() - t1}ms · contexto ${context.length} chars`);
+  console.info(`[RAG] perfil ${profile.tier} (${activeProvider("chat")?.chatModel} · ${profile.family} ${Number(profile.sizeB.toFixed(1))}B/${profile.sizeSource} · ctx ${profile.contextTokens} · topK ${rerankInfo ? `${scored.length} de ${rerankInfo.candidates} (rerank ${rerankInfo.ms}ms)` : effectiveTopK}) · busca ${t1 - t0}ms · 1º token ${firstToken ? firstToken - t1 : "-"}ms · geração ${Date.now() - t1}ms · contexto ${context.length} chars`);
   const answer = (raw || "O modelo não retornou resposta.").replace(/<contexto>[\s\S]*?<\/contexto>\s*/gi, "").replace(/<\/?contexto>/gi, "").replace(/\s*\[Fonte\s+\d+[^\]]*\]/gi, "").replace(/^[ \t]*\[(Documento|Seção|Registro|Registros exatos|Vigente)[^\]\n]*\][ \t]*\n?/gim, "").replace(/[ \t]{2,}/g, " ").trim();
   // Citações: só entram as fontes que contêm os códigos/números/termos usados na resposta.
   const supported = new Set(supportingItems(answer, [...recordSources.map(r => ({ ...r, content: r.excerpt })), ...includedItems]));

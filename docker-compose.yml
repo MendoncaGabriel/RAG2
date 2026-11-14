@@ -39,6 +39,16 @@ x-app-env: &app-env
   MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-}
   NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
   CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
+  # Reranking local (Cross-Encoder ONNX em CPU): modelo baixado no 1º uso para APP_DATA_DIR/reranker.
+  RERANK_ENABLED: ${RERANK_ENABLED:-true}
+  RERANK_MODEL: ${RERANK_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
+  RERANK_MODEL_FILE: ${RERANK_MODEL_FILE:-}
+  RERANK_CANDIDATES: ${RERANK_CANDIDATES:-25}
+  RERANK_TOP_N: ${RERANK_TOP_N:-}
+  RERANK_MAX_LENGTH: ${RERANK_MAX_LENGTH:-512}
+  RERANK_BATCH: ${RERANK_BATCH:-4}
+  RERANK_THREADS: ${RERANK_THREADS:-}
+  RERANK_HF_URL: ${RERANK_HF_URL:-https://huggingface.co}
   HISTORY_MESSAGES: ${HISTORY_MESSAGES:-4}
   HISTORY_MAX_CHARS: ${HISTORY_MAX_CHARS:-2000}
   MAX_MESSAGES_PER_CONVERSATION: ${MAX_MESSAGES_PER_CONVERSATION:-40}
@@ -96,7 +106,7 @@ services:
         condition: service_completed_successfully
       qdrant:
         condition: service_healthy
-    # backend: Qdrant (interna, sem saída) · egress: Ollama do Windows e downloads dos modelos de voz.
+    # backend: Qdrant (interna, sem saída) · egress: Ollama do Windows e downloads dos modelos de voz e do reranker.
     networks: [backend, egress]
     ports:
       - "${APP_BIND:-127.0.0.1}:${PORT:-3000}:3000"

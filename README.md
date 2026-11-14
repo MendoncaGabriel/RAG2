@@ -75,10 +75,11 @@ Garantias: reprocessar/reindexar sobrescreve os mesmos IDs (idempotente, sem dup
 2. Embedding da pergunta no Ollama (cache LRU de 256 consultas).
 3. **Uma ida ao Qdrant** (`/points/query/batch`), sempre filtrada pelo notebook: busca **densa** (HNSW sobre INT8 + rescore com os vetores originais), busca **esparsa BM25**, busca por **código exato** (`codes` com índice de payload, quando a pergunta cita códigos) e uma **amostra aleatória** re-pontuada (média/desvio da similaridade no notebook, para o portão de relevância por z-score). Sumários ficam fora das listas densa/esparsa.
 4. União dos IDs → textos e metadados **em lote no SQLite** (só documentos `processed`).
-5. **Fusão RRF** (k=60) das listas densa e esparsa, com o voto lexical ponderado pela fração dos termos da pergunta presentes no trecho; casamento exato de código e período citado têm prioridade; portão de relevância; corte relativo.
-6. Trechos vizinhos, montagem do contexto com limite de tamanho, LLM do Windows em streaming.
+5. **Fusão RRF** (k=60) das listas densa e esparsa, com o voto lexical ponderado pela fração dos termos da pergunta presentes no trecho; casamento exato de código e período citado têm prioridade; portão de relevância.
+6. **Reranking local** (filtro de precisão): os 25 melhores candidatos que passaram no portão são pontuados por um **Cross-Encoder** em CPU (ONNX, sem Ollama), que lê pergunta e trecho juntos; só os **4 mais relevantes** seguem ao prompt dos modelos até 2,5B (qwen3:1.7b). Trechos com o código exato citado continuam na frente. Sem o modelo pronto (1º download) ou com `RERANK_ENABLED=false`, vale o corte relativo da pontuação combinada com o top-K do perfil.
+7. Trechos vizinhos, montagem do contexto com limite de tamanho (o trecho mais relevante fica por último, junto da pergunta), LLM do Windows em streaming.
 
-A fusão é feita na aplicação (e não com `fusion: rrf` do Qdrant) porque o ranqueamento usa as pontuações individuais de cada lista (portão por z-score, cobertura de termos), calibradas pelo benchmark. Um reranking futuro pode entrar entre os passos 4 e 5 sem mudar o resto.
+A fusão é feita na aplicação (e não com `fusion: rrf` do Qdrant) porque o ranqueamento usa as pontuações individuais de cada lista (portão por z-score, cobertura de termos), calibradas pelo benchmark.
 
 ### Collection do Qdrant
 
@@ -114,6 +115,7 @@ Todas as variáveis estão em [.env.example](.env.example) (comentadas) e são r
 - **Qdrant:** `QDRANT_QUANTILE`, `QDRANT_OVERSAMPLING`, `QDRANT_HNSW_EF`, `QDRANT_ON_DISK_VECTORS`.
 - **Ingestão:** `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBED_BATCH_SIZE`, `BM25_AVG_DOC_LEN`, `DOCUMENT_PROCESS_CONCURRENCY`, `MAX_FILE_SIZE_MB`, `OCR_LANG`, `SYNC_INTERVAL_MIN`.
 - **Geração e busca:** `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `NEIGHBOR_EXPAND_TOP`, `CHAT_MAX_TOKENS`, `HISTORY_MESSAGES`, `HISTORY_MAX_CHARS` (vazios = perfil do modelo).
+- **Reranking local:** `RERANK_ENABLED`, `RERANK_MODEL`, `RERANK_MODEL_FILE`, `RERANK_CANDIDATES`, `RERANK_TOP_N`, `RERANK_MAX_LENGTH`, `RERANK_BATCH`, `RERANK_THREADS`, `RERANK_DIR`, `RERANK_HF_URL` (ver [Recuperação híbrida](#recuperação-híbrida)).
 - **Infra:** `PORT`, `APP_BIND`, `VOLUMES_DIR`, `APP_UID`/`APP_GID`.
 
 ## Testes
@@ -211,6 +213,7 @@ Medições no Ryzen 7 7735U (8 núcleos, 32 GB), prompt típico do RAG (~1200–
 - **Busca híbrida no Qdrant**: BM25 (vetores esparsos com stemming leve para português, IDF do Qdrant) + similaridade vetorial densa, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings. Detalhes em [Arquitetura de recuperação](#arquitetura-de-recuperação).
 - **Sem índice em memória**: a memória da aplicação não cresce com o volume de documentos; os vetores ficam no Qdrant (INT8 na RAM, originais em disco).
 - **Portão de relevância**: trecho sem nenhum termo em comum com a pergunta só entra se se destacar estatisticamente dos demais (z-score). Perguntas fora do assunto dos documentos são recusadas sem gastar uma chamada ao modelo de chat.
+- **Reranking local** ([src/rerank.ts](src/rerank.ts)): Cross-Encoder `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (multilíngue, treinado no mMARCO, que inclui português; int8, ~135 MB) via transformers.js + onnxruntime-node. Medido no container (CPU de 8 núcleos): ~0,8–1 s para 25 trechos em lotes de 4 (`RERANK_BATCH`); ocupa ~380 MB de RAM (tokenizer multilíngue ~115 MB, modelo ~170 MB, inferência ~90 MB). O `onnx-community/bge-reranker-v2-m3-ONNX` (int8, ~570 MB) teve a mesma precisão na base de teste, mas ~11 s por pergunta; use-o só com CPU folgada. O modelo é baixado do Hugging Face na inicialização para `APP_DATA_DIR/reranker`; até terminar, as perguntas seguem sem reranking. Variáveis: `RERANK_ENABLED`, `RERANK_MODEL`, `RERANK_MODEL_FILE`, `RERANK_CANDIDATES` (25), `RERANK_TOP_N` (vazio = 4 nos modelos até 2,5B; top-K do perfil, mínimo 4, nos maiores), `RERANK_MAX_LENGTH`, `RERANK_BATCH`, `RERANK_THREADS`, `RERANK_DIR`, `RERANK_HF_URL`. O log mostra `topK 4 de 25 (rerank …ms)`.
 - **Trechos vizinhos** (`NEIGHBOR_EXPAND_TOP`): os melhores resultados ganham os trechos adjacentes, e trechos contíguos viram uma passagem única, sem repetir o overlap.
 - **Prefixos de embedding**: `nomic-embed-text` (`search_query:`/`search_document:`) e modelos `e5` (`query:`/`passage:`) usam os prefixos para os quais foram treinados. **Reprocesse os documentos** ao adotar esta versão com esses modelos.
 - **Log de tempos** no servidor: `[RAG] busca … · 1º token … · geração …`.

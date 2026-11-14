@@ -19,6 +19,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-bench-"));
 process.env.SQLITE_PATH = path.join(tmp, "bench.sqlite");
 process.env.APP_DATA_DIR = tmp;
 process.env.UPLOAD_DIR = path.join(tmp, "uploads");
+// Reranker fora da pasta temporária: o modelo baixado serve às próximas execuções.
+process.env.RERANK_DIR ||= path.join(os.tmpdir(), "rag-reranker");
 // Collection própria e temporária no Qdrant (QDRANT_URL/QDRANT_API_KEY do ambiente): não toca nos dados da aplicação.
 const benchCollection = `bench_${Date.now()}`;
 process.env.QDRANT_COLLECTION = benchCollection;
@@ -43,6 +45,8 @@ db.prepare("INSERT INTO documents(id,notebook_id,name,type,status) VALUES(?,?,?,
 const tIngest = Date.now();
 await documents.processDocument(doc, nb, null, "Base_RAG_Verdanis.md", corpus);
 const ingestMs = Date.now() - tIngest;
+// O reranker carrega antes da 1ª pergunta (no servidor ele carrega na inicialização). Versões antigas (--src) não têm.
+await rag.prepareReranker?.();
 const chunks = (db.prepare("SELECT count(*) AS n, avg(length(content)) AS avg FROM chunks").get() as { n: number; avg: number });
 console.log(`[${label}] ingestão: ${ingestMs} ms · ${chunks.n} trechos (média ${Math.round(chunks.avg)} chars)`);
 

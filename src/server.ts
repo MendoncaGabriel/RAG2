@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, tuneTarget, uuid } from "./rag.js";
+import { ask, chatContext, prepareReranker, tuneTarget, uuid } from "./rag.js";
 import { autoTune } from "./tuning.js";
 import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, ollamaStatus, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
 import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
@@ -205,6 +205,8 @@ app.use((err:unknown,_req:express.Request,res:express.Response,_next:express.Nex
 const port=Number(process.env.PORT)||3000;
 // Depois de subir: espera o Qdrant, confere o Ollama do Windows e reconcilia os bancos (com novas tentativas até dar certo).
 async function startupChecks(){
+  // Reranker local (Cross-Encoder ONNX): baixa/carrega em segundo plano; até ficar pronto, as perguntas seguem sem reranking.
+  void prepareReranker();
   for(let i=0;!(await qdrant.ready());i++){ if(i%10===0)console.warn(`[Qdrant] aguardando ${config.qdrant.url}…`); await new Promise(r=>setTimeout(r,2_000)); }
   console.info(`[Qdrant] conectado a ${config.qdrant.url} (versão ${await qdrant.version()}), collection "${config.qdrant.collection}".`);
   const o=await ollamaStatus();
