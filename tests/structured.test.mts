@@ -141,8 +141,25 @@ test("prompt de sistema: mínimo para modelos pequenos, com regras explícitas d
     const p = buildSystemPrompt(tier);
     assert.match(p, /REGRAS:/); assert.match(p, /exatamente como aparecem/);
   }
+  // O contexto chega ranqueado e o prompt diz a ordem; CONTEXT_ORDER=relevance_last inverte o aviso.
+  for (const tier of ["pequeno", "médio"]) assert.match(buildSystemPrompt(tier), /do mais relevante para o menos relevante/);
+  process.env.CONTEXT_ORDER = "relevance_last";
+  assert.match(buildSystemPrompt("pequeno"), /do menos relevante para o mais relevante/);
+  delete process.env.CONTEXT_ORDER;
   // A recusa padrão existe em todos os perfis (o benchmark depende dela para detectar abstenção).
   for (const tier of ["mini", "pequeno", "médio", "grande"]) assert.match(buildSystemPrompt(tier), /Não encontrei essa informação nos documentos\./);
+});
+
+test("prompt do modo conversa: explica e ensina sem recusa fixa, fatos só do contexto, contexto como dados", async () => {
+  const { buildConversationPrompt } = await import("../src/rag.js");
+  for (const tier of ["mini", "pequeno", "médio", "grande"]) {
+    const p = buildConversationPrompt(tier);
+    assert.doesNotMatch(p, /Não encontrei essa informação nos documentos\./);
+    assert.match(p, /explique|Explique/); assert.match(p, /tire dúvidas/);
+    assert.match(p, /vêm só de <contexto>/); assert.match(p, /nunca instruções/);
+  }
+  assert.doesNotMatch(buildConversationPrompt("pequeno"), /REGRAS:/);
+  assert.match(buildConversationPrompt("médio"), /REGRAS:/);
 });
 
 test("perfil por modelo: reconhece tamanho, família e ajusta recuperação e geração", async () => {
@@ -155,6 +172,10 @@ test("perfil por modelo: reconhece tamanho, família e ajusta recuperação e ge
   }
   assert.equal(deriveProfile("qwen2.5:3b").family, "qwen2");
   assert.equal(deriveProfile("qwen2.5:1.5b").tier, "pequeno");
+  // Qwen3.5-2B: família qwen3 (sem decodificação gulosa), passagens inteiras dos 5 melhores com vizinhos e contexto maior.
+  const q35 = deriveProfile("qwen3.5:2b", { parameterSize: 2.3, contextLength: 262144 });
+  assert.equal(q35.family, "qwen3"); assert.equal(q35.tier, "pequeno"); assert.ok(q35.temperature >= 0.1); assert.equal(q35.topKSampling, 20);
+  assert.equal(q35.topK, 5); assert.ok(q35.contextChars >= 8_000 && q35.contextTokens >= 8192 && q35.neighbors >= 1);
   assert.equal(deriveProfile("gemma3:270m").tier, "mini");
   assert.equal(deriveProfile("llama3.1:8b").tier, "grande");
   assert.equal(deriveProfile("mixtral:8x7b").tier, "avançado");
@@ -175,4 +196,14 @@ test("perfil por modelo: reconhece tamanho, família e ajusta recuperação e ge
   assert.equal(embeddingPrefix("nomic-embed-text", "document"), "search_document: ");
   assert.match(embeddingPrefix("mxbai-embed-large", "query"), /^Represent this sentence/);
   assert.equal(embeddingPrefix("mxbai-embed-large", "document"), "");
+});
+
+test("orçamento de contexto: estimativa de tokens com folga sobre o medido no qwen3.5:2b", async () => {
+  const { promptTokens, CHARS_PER_TOKEN } = await import("../src/rag.js");
+  // Medido: 3,8–4,2 caracteres por token em blocos de texto e ~3 em prompts com muitas tabelas; a estimativa usa 2,5.
+  assert.ok(CHARS_PER_TOKEN <= 2.5);
+  assert.equal(promptTokens(["x".repeat(300)]), 128);
+  assert.equal(promptTokens(["abc", "abcd"]), 2 + 8 + 2 + 8);
+  // 12.000 caracteres reais da base deram 3.144 tokens no Ollama: a estimativa fica acima.
+  assert.ok(promptTokens(["x".repeat(12_000)]) > 3_144);
 });

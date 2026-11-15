@@ -304,10 +304,12 @@
   }
 
   // ---------- Pergunta e resposta falada ----------
+  // Trechos achados pela busca e quantos foram usados depois do ranqueamento.
+  const retrievalHint = ev => { const s = ev.stats, pl = n => n === 1 ? '' : 's'; return s ? `${s.found} trecho${pl(s.found)} encontrado${pl(s.found)} · ${s.used} usado${pl(s.used)} após o ranqueamento…` : `Lendo ${ev.sources.length} trecho${pl(ev.sources.length)}…` };
   async function ask(content, t) {
     setState('thinking'); showUser(content); $q('#vAnswer').innerHTML = '';
     try {
-      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode }), signal: t.ctrl.signal });
+      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode, conversational: typeof chatMode !== 'undefined' && chatMode }), signal: t.ctrl.signal });
       if (res.status === 401) return location.replace('/login.html');
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw Error(d.error || `Erro ${res.status}`) }
       used = true;
@@ -315,7 +317,7 @@
       const handle = line => {
         if (!line.trim()) return; const ev = JSON.parse(line);
         if (ev.type === 'token') { t.text += ev.token; paintAnswer(); feed(t) }
-        else if (ev.type === 'sources' && !t.text && state === 'thinking') $q('#vHint').textContent = `Lendo ${ev.sources.length} trecho${ev.sources.length === 1 ? '' : 's'}…`;
+        else if (ev.type === 'sources' && !t.text && state === 'thinking') $q('#vHint').textContent = retrievalHint(ev);
         else if (ev.type === 'done') { if (!t.text) t.text = ev.assistant?.content || ''; t.done = true }
         else if (ev.type === 'error') throw Error(ev.error);
       };

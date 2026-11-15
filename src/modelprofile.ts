@@ -13,7 +13,8 @@ export interface ModelProfile {
   reasoningOnly: boolean;
 }
 
-// Modelos abaixo de 2,5B (mini/pequeno) recebem prompt mínimo e contexto curto; do médio em diante usam regras explícitas e mais contexto.
+// Modelos abaixo de 2,5B (mini/pequeno) recebem prompt mínimo; do médio em diante usam regras explícitas. Só o mini (< 1B) fica
+// com contexto curto e trechos podados.
 export const isCompact = (tier: string) => tier === "mini" || tier === "pequeno";
 
 const toBillions = (value: number, unit: string) => (/^m/i.test(unit) ? value / 1000 : value);
@@ -63,12 +64,17 @@ export function deriveProfile(name: string, info?: ModelInfo): ModelProfile {
   const family = familyOf(name, info?.family);
   let base: Omit<ModelProfile, "family" | "sizeB" | "sizeSource" | "reasoningOnly">;
   if (sizeB < 1) base = { tier: "mini", temperature: 0, topP: 0.7, topKSampling: 20, repeatPenalty: 1.2, maxTokens: 400, contextTokens: 3072, topK: 2, contextChars: 2_500, neighbors: 0 };
-  else if (sizeB < 2.5) base = { tier: "pequeno", temperature: 0, topP: 0.8, topKSampling: 30, repeatPenalty: 1.1, maxTokens: 400, contextTokens: 3072, topK: 3, contextChars: 3_500, neighbors: 0 };
-  // 3–4B rodando em CPU: o preenchimento do prompt domina o tempo; topK 5 / 4500 caracteres mantêm o vizinho do melhor trecho.
-  else if (sizeB < 6) base = { tier: "médio", temperature: 0, topP: 0.8, topKSampling: 30, repeatPenalty: 1.05, maxTokens: 1024, contextTokens: 6144, topK: 5, contextChars: 4_500, neighbors: 1 };
-  else if (sizeB < 14) base = { tier: "grande", temperature: 0.1, topP: 0.9, topKSampling: 40, repeatPenalty: 1.05, maxTokens: 1536, contextTokens: 8192, topK: 8, contextChars: 7_000, neighbors: 1 };
-  else base = { tier: "avançado", temperature: 0.1, topP: 0.9, topKSampling: 40, repeatPenalty: 1.05, maxTokens: 2048, contextTokens: 10240, topK: 9, contextChars: 9_000, neighbors: 1 };
-  if (!isCompact(base.tier)) Object.assign(base, familySampling(family, base));
+  // 1–2,5B (Qwen3.5-2B, qwen3:1.7b): o reranking já filtra o ruído, então o modelo recebe passagens inteiras dos 5 melhores, com os
+  // vizinhos dos 2 primeiros (≈8000 caracteres, ~2500–3000 tokens). Contexto de 8192 deixa folga para histórico e resposta detalhada.
+  // Com GPU (~600 tokens/s de preenchimento medidos no PC de referência) isso custa ~5 s antes da 1ª palavra.
+  else if (sizeB < 2.5) base = { tier: "pequeno", temperature: 0, topP: 0.8, topKSampling: 30, repeatPenalty: 1.1, maxTokens: 700, contextTokens: 8192, topK: 5, contextChars: 8_000, neighbors: 2 };
+  // 3–4B: mesma lógica, com mais folga de saída.
+  else if (sizeB < 6) base = { tier: "médio", temperature: 0, topP: 0.8, topKSampling: 30, repeatPenalty: 1.05, maxTokens: 1024, contextTokens: 8192, topK: 5, contextChars: 9_000, neighbors: 2 };
+  else if (sizeB < 14) base = { tier: "grande", temperature: 0.1, topP: 0.9, topKSampling: 40, repeatPenalty: 1.05, maxTokens: 1536, contextTokens: 12288, topK: 8, contextChars: 12_000, neighbors: 2 };
+  else base = { tier: "avançado", temperature: 0.1, topP: 0.9, topKSampling: 40, repeatPenalty: 1.05, maxTokens: 2048, contextTokens: 16384, topK: 9, contextChars: 16_000, neighbors: 2 };
+  // Amostragem da família do pequeno em diante. Qwen3/Qwen3.5 não devem usar decodificação gulosa (laços de repetição), e a
+  // penalidade 1.05 (no lugar de 1.1) atrapalha menos a cópia exata de códigos e valores.
+  if (base.tier !== "mini") Object.assign(base, familySampling(family, base));
   // Contexto nunca acima do que o modelo suporta; o texto recuperado encolhe junto (≈2,5 caracteres por token, com folga para prompt e resposta).
   const native = info?.contextLength || nativeContext(name, family);
   if (native && native < base.contextTokens) {

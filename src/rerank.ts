@@ -11,8 +11,9 @@ const envNum = (name: string, fallback: number) => { const v = Number(process.en
 export const rerankEnabled = () => process.env.RERANK_ENABLED !== "false";
 // Candidatos da busca híbrida que o Cross-Encoder reordena e quantos seguem para o prompt.
 export const rerankCandidates = () => Math.max(1, Math.min(100, Math.round(envNum("RERANK_CANDIDATES", 25))));
-// Sem RERANK_TOP_N, quem chama decide (rag.ts: 4 nos modelos compactos, como o qwen3:1.7b; o top-K do perfil, no mínimo 4, nos maiores).
-export const rerankTopN = (fallback: number) => Math.max(1, Math.min(20, Math.round(envNum("RERANK_TOP_N", fallback))));
+// Teto opcional de trechos depois do reranking. Sem RERANK_TOP_N, quem chama decide (rag.ts: 4 nos modelos mini, < 1B; do pequeno em
+// diante, sem teto: todos os candidatos que passam no corte de relevância, até caberem no contexto).
+export const rerankTopN = (fallback: number) => Math.max(1, Math.min(100, Math.round(envNum("RERANK_TOP_N", fallback))));
 const modelId = () => (process.env.RERANK_MODEL || "").trim() || DEFAULT_MODEL;
 // Arquivo ONNX dentro de onnx/ (sem ".onnx"). O padrão usa a versão int8 publicada por cada repositório.
 const modelFile = () => (process.env.RERANK_MODEL_FILE || "").trim() || (modelId() === DEFAULT_MODEL ? "model_quint8_avx2" : "model_int8");
@@ -83,8 +84,19 @@ export async function rerankScores(query: string, texts: string[]): Promise<numb
   catch (e) { console.warn("[Rerank] falha ao pontuar; usada a ordem da busca:", e instanceof Error ? e.message : String(e)); return null; }
 }
 
+// Corte de relevância, sem número fixo de trechos: fica todo trecho com nota até RERANK_MAX_GAP (logit) abaixo da do melhor; se só um
+// é relevante, só ele segue; se 9 são, os 9 seguem (o orçamento de contexto do prompt, em rag.ts, é o limite final). Calibrado na
+// base Verdanis (28 perguntas com gabarito, 25 candidatos cada): o teto de 5 + "nota >= 0 sempre fica" recuperava 75% dos trechos
+// do gabarito com 57% de precisão e deixava 1 pergunta sem nenhum; só a distância 6 do melhor, sem teto: 84% e 63%, nenhuma sem.
+// "Nota >= 0 sempre fica" foi retirado: com o melhor em 10, trazia ruído em 1–2. Piso absoluto também não: linhas de tabela do
+// gabarito pontuam -3 a -4 (o Cross-Encoder não lê tabela bem).
+export const rerankMaxGap = () => Math.max(0, envNum("RERANK_MAX_GAP", 6));
+
 // Ordem final: casamento exato de código continua na frente (o trecho com "PRJ-ARARA" não pode perder para um parecido); dentro de
-// cada faixa vale a pontuação do Cross-Encoder; empate fica com a ordem da busca. Devolve os índices dos topN escolhidos.
-export function rerankOrder(scores: number[], codeHit: number[], topN: number): number[] {
-  return scores.map((_, i) => i).sort((a, b) => (codeHit[b] || 0) - (codeHit[a] || 0) || scores[b] - scores[a] || a - b).slice(0, topN);
+// cada faixa vale a pontuação do Cross-Encoder; empate fica com a ordem da busca. Devolve os índices escolhidos, do mais relevante
+// para o menos relevante: o melhor e os de código exato sempre; os demais só dentro de maxGap do melhor; no máximo topN.
+export function rerankOrder(scores: number[], codeHit: number[], topN: number, maxGap = Infinity): number[] {
+  const floor = Math.max(...scores) - maxGap;
+  return scores.map((_, i) => i).sort((a, b) => (codeHit[b] || 0) - (codeHit[a] || 0) || scores[b] - scores[a] || a - b)
+    .filter((i, k) => k === 0 || (codeHit[i] || 0) > 0 || scores[i] >= floor).slice(0, topN);
 }

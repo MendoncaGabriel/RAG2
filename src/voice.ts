@@ -49,9 +49,12 @@ const isReady = (a: Asset) => fs.existsSync(marker(a));
 type Job = { status: "idle" | "running" | "ready" | "error"; stage: string; done: number; total: number; error?: string };
 let job: Job = { status: "idle", stage: "", done: 0, total: 0 }, running: Promise<void> | null = null;
 
+// Sem rede (ou proxy que segura a conexão) a consulta ficaria pendurada: falha rápido e diz onde pôr os modelos.
+const offlineHint = `Copie os modelos já baixados (npm run voice:download) para ${voiceDir}.`;
 async function listFiles(a: Asset) {
-  const r = await fetch(`${hfUrl}/api/models/${a.repo}/tree/main?recursive=true`);
-  if (!r.ok) throw Error(`Não foi possível listar ${a.repo} (HTTP ${r.status}).`);
+  const r = await fetch(`${hfUrl}/api/models/${a.repo}/tree/main?recursive=true`, { signal: AbortSignal.timeout(15_000) })
+    .catch(e => { throw Error(`Modelos de voz ausentes e sem acesso a ${hfUrl} (${e instanceof Error ? e.message : e}). ${offlineHint}`); });
+  if (!r.ok) throw Error(`Não foi possível listar ${a.repo} (HTTP ${r.status}). ${offlineHint}`);
   const files = ((await r.json()) as { type: string; path: string; size: number }[]).filter(f => f.type === "file" && a.filter.test(f.path));
   if (!files.length) throw Error(`Nenhum arquivo encontrado em ${a.repo}.`);
   return files;

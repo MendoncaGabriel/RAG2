@@ -200,7 +200,9 @@ const threadOption = (p: Provider) => { const n = tunedThreads(p.baseUrl); retur
 
 // ---------- Chat ----------
 export type Msg = { role: "system" | "user" | "assistant"; content: string };
-export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; topK?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal }
+// onStats: tokens que o Ollama informa no fim (prompt_eval_count/eval_count). Com o início do prompt em cache, prompt_eval_count conta
+// só a parte processada nesta chamada.
+export interface ChatOptions { messages: Msg[]; temperature?: number; topP?: number; topK?: number; maxTokens?: number; contextSize?: number; repeatPenalty?: number; json?: boolean; signal?: AbortSignal; onStats?: (s: { promptTokens: number; outputTokens: number }) => void }
 
 export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token: string) => void): Promise<string> {
   let full = "";
@@ -216,7 +218,11 @@ export async function chatWith(p: Provider, opts: ChatOptions, onToken?: (token:
     messages: opts.messages,
   } });
   if (!res.ok || !res.body) throw await httpError(label, res, p.chatModel);
-  await readLines(res, line => { const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error}`); emit(String(c.message?.content || "")); });
+  await readLines(res, line => {
+    const c = JSON.parse(line); if (c.error) throw new Error(`${label}: ${c.error}`);
+    emit(String(c.message?.content || ""));
+    if (c.done) opts.onStats?.({ promptTokens: Number(c.prompt_eval_count) || 0, outputTokens: Number(c.eval_count) || 0 });
+  });
   return full;
 }
 export async function chat(opts: ChatOptions, onToken?: (token: string) => void) {
