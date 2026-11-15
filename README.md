@@ -54,16 +54,22 @@ Na inicialização a aplicação valida as variáveis obrigatórias, espera o Qd
 | `sqlite/` | `database.db` (+ WAL) |
 | `app/` | uploads originais, relatórios, dados de OCR, modelos de voz, `tuning.json` |
 
+Importação em lote: a pasta `${IMPORT_DIR:-./import}` do host é montada **só leitura** em `/app/import`. Os arquivos dela são lidos onde estão (não são copiados para `app/`) e podem ficar em `/mnt/c`; só os bancos exigem ext4.
+
 Os dados sobrevivem a `docker compose down/up`, reinício do Docker/WSL e reconstrução da imagem. **Qdrant e SQLite (WAL) não funcionam de forma confiável em pastas do Windows montadas no WSL (`/mnt/c`, 9p)** — o próprio Qdrant não suporta esse tipo de sistema de arquivos. Se o projeto estiver em `/mnt/c/...`, defina `VOLUMES_DIR` no `.env` para uma pasta do Linux (ex.: `/home/<usuario>/rag-volumes`); com o projeto dentro do WSL (ex.: `~/RAG2`), o padrão `./volumes` serve. A aplicação avisa no log se o SQLite estiver numa montagem 9p/drvfs.
 
 ## Arquitetura de recuperação
 
-### Ingestão (duas fases, sem transação distribuída)
+### Ingestão (BM25 primeiro, busca semântica em segundo plano; sem transação distribuída)
 
 1. Extração e limpeza do texto (PDF por página, DOCX, PPTX, planilhas, OCR de imagens…) e **chunking estrutural** (abaixo).
 2. **SQLite, numa transação:** trechos com **ID determinístico** (UUID derivado de documento + posição), texto original, texto normalizado, seção, páginas, marca de sumário; registros estruturados; documento em `stage='index'`.
-3. **Qdrant, em lotes** (`EMBED_BATCH_SIZE`): embeddings (Ollama) + vetor esparso BM25 por trecho → `upsert` com `wait=true` → o lote é marcado `indexed=1` no SQLite. Pontos excedentes de uma versão anterior maior do documento são removidos.
-4. Só então o documento vira `processed` (`stage='done'`, com o modelo de embeddings usado).
+3. **Qdrant, fase BM25** (lotes de 256, sem o Ollama): cada trecho vira um ponto só com o vetor esparso BM25 e o payload → `upsert` com `wait=true` → `indexed=2`. Pontos excedentes de uma versão anterior maior do documento são removidos. O documento já fica `processed` (`stage='dense'`): **responde perguntas pela busca por palavras + reranking** segundos depois do envio.
+4. **Fase densa, em segundo plano** (um worker por processo, lotes de `EMBED_BATCH_SIZE`): embeddings no Ollama, na ordem de chegada dos documentos → atualiza só o vetor denso do ponto (`PUT /points/vectors`) → `indexed=1`. Sem pendências, o documento passa a `stage='done'`. A interface mostra "Busca semântica N/M" no cartão do documento. O worker pausa enquanto há pergunta em andamento (o Ollama atende a pergunta primeiro) e, se o Ollama ou o Qdrant cair, para e é retomado pela reconciliação.
+
+Enquanto o vetor denso de um trecho não chega, a busca o julga só pelo lado lexical: entra se cobre ao menos metade dos termos da pergunta ou cita o código exato, e o Cross-Encoder decide a ordem. Medido com a base de teste + 1 MB de distratores (34 documentos, 1.992 trechos): tudo pesquisável em 3 s contra 322 s antes (o tempo total até a busca semântica completa é o mesmo, limitado pelo embedding no Ollama: ~6 trechos/s com bge-m3 neste PC).
+
+Envios repetidos: o hash SHA-256 de cada arquivo fica em `documents.content_hash`; o mesmo conteúdo enviado de novo ao notebook (com qualquer nome, inclusive dentro do mesmo envio ou da importação de pasta) é ignorado e a interface avisa.
 
 Garantias: reprocessar/reindexar sobrescreve os mesmos IDs (idempotente, sem duplicatas); se o Ollama ou o Qdrant cair no meio, os trechos já estão no SQLite e a indexação **retoma só o que falta** (na inicialização, a cada `SYNC_INTERVAL_MIN` se houver pendências, em `POST /api/system/sync` ou com "Reprocessar"). Exclusões apagam primeiro no SQLite (a busca ignora pontos sem linha no SQLite) e depois no Qdrant; se o Qdrant estiver fora, ficam em `vector_deletions` e a reconciliação conclui.
 
@@ -87,11 +93,14 @@ A fusão é feita na aplicação (e não com `fusion: rrf` do Qdrant) porque o r
 |---|---|---|
 | Vetor denso `dense` | dimensão do modelo (1024 no `bge-m3`), Cosine, `on_disk: true` | originais em disco (memmap); a RAM fica com os quantizados |
 | Vetor esparso `bm25` | `modifier: idf` | o Qdrant calcula o IDF; a aplicação envia a frequência saturada BM25 (k1=1,4, b=0,75, comprimento médio `BM25_AVG_DOC_LEN`) |
-| Quantização | `scalar int8`, `quantile 0.99`, `always_ram: true` | 4× menos RAM por vetor (1 KB em vez de 4 KB no bge-m3) |
-| Busca | `rescore: true`, `oversampling: 2`, `hnsw_ef: 128` | pré-seleção quantizada, ordem final com float32: precisão preservada |
+| Índice BM25 | `index.on_disk: true` (`QDRANT_SPARSE_ON_DISK`) | índice invertido em memmap: a RAM não cresce com o vocabulário; o cache de páginas do sistema mantém quente o que é usado |
+| Quantização | `scalar int8`, `quantile 0.99`, `always_ram: true` (padrão; `QDRANT_QUANTIZATION`) | 4× menos RAM por vetor (1 KB em vez de 4 KB no bge-m3); `binary2` (2 bits, 256 B) e `binary` (1 bit, 128 B) para bases muito grandes |
+| Busca | `rescore: true`, `oversampling: 2` (mínimo 4 nas binárias), `hnsw_ef: 128` | pré-seleção quantizada, ordem final com float32: precisão preservada |
 | HNSW | `m: 0`, `payload_m: 16` + `notebook_id` com `is_tenant` | multitenancy: um grafo por notebook, sem grafo global (toda busca é por notebook) |
 | Índices de payload | `notebook_id`, `document_id`, `source_type`, `codes` (keyword), `chunk_index` (integer), `toc` (bool) | filtros, exclusão por documento, faceta da reconciliação |
 | Payload | IDs, posição, códigos, página, modelo — **sem o texto** | o texto fica só no SQLite |
+
+Quantização e índice BM25 valem também para a collection existente: na inicialização a aplicação compara a configuração e aplica a diferença com `PATCH` (o Qdrant reconstrói em segundo plano, sem reindexar e sem parar a busca).
 
 Trocar o modelo de embeddings: as perguntas avisam para clicar em **Reindexar** (nunca misturam vetores de modelos diferentes); a primeira reindexação recria a collection com a nova dimensão.
 
@@ -104,7 +113,7 @@ Trocar o modelo de embeddings: as perguntas avisam para clicar em **Reindexar** 
 
 ### SQLite
 
-Tabelas: `notebooks`, `documents` (status, `stage`, progresso, modelo de embeddings, texto colado), `chunks` (texto, texto normalizado, seção, páginas, `toc`, `indexed`; `UNIQUE(document_id, chunk_index)`), `records`, `conversations`, `messages`, `saved_messages` (`indexed`), `vector_deletions`, `settings`, `ai_providers`. Sem embeddings e sem cálculo de similaridade. Bancos da versão anterior (vetores em BLOB) não são migrados: a aplicação recusa e pede um `SQLITE_PATH` novo.
+Tabelas: `notebooks`, `documents` (status, `stage`, progresso, modelo de embeddings, texto colado, `content_hash`, `external`), `chunks` (texto, texto normalizado, seção, páginas, `toc`, `indexed` 0/2/1 = fora do Qdrant/só BM25/completo; `UNIQUE(document_id, chunk_index)`), `records`, `conversations`, `messages`, `saved_messages` (`indexed`), `vector_deletions`, `document_summaries` (resumo guardado por documento), `settings`, `ai_providers`. Sem embeddings e sem cálculo de similaridade. Bancos da versão anterior (vetores em BLOB) não são migrados: a aplicação recusa e pede um `SQLITE_PATH` novo.
 
 ## Configuração
 
@@ -112,8 +121,8 @@ Todas as variáveis estão em [.env.example](.env.example) (comentadas) e são r
 
 - **Conexões:** `OLLAMA_BASE_URL`, `OLLAMA_API_KEY`, `QDRANT_URL` (fixo `http://qdrant:6333` no Compose), `QDRANT_API_KEY`, `QDRANT_COLLECTION`.
 - **Modelos:** `OLLAMA_LLM_MODEL` (respostas) e `OLLAMA_EMBEDDING_MODEL` (busca), independentes. O Ollama do ambiente aparece em Configurações como "Ollama (Windows)" e é atualizado a cada inicialização; outros servidores podem ser cadastrados lá.
-- **Qdrant:** `QDRANT_QUANTILE`, `QDRANT_OVERSAMPLING`, `QDRANT_HNSW_EF`, `QDRANT_ON_DISK_VECTORS`.
-- **Ingestão:** `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBED_BATCH_SIZE`, `BM25_AVG_DOC_LEN`, `DOCUMENT_PROCESS_CONCURRENCY`, `MAX_FILE_SIZE_MB`, `OCR_LANG`, `SYNC_INTERVAL_MIN`.
+- **Qdrant:** `QDRANT_QUANTIZATION` (`int8`, `binary2`, `binary`), `QDRANT_QUANTIZED_IN_RAM`, `QDRANT_SPARSE_ON_DISK`, `QDRANT_QUANTILE`, `QDRANT_OVERSAMPLING`, `QDRANT_HNSW_EF`, `QDRANT_ON_DISK_VECTORS`.
+- **Ingestão:** `CHUNK_SIZE`, `CHUNK_OVERLAP`, `EMBED_BATCH_SIZE`, `BM25_AVG_DOC_LEN`, `DOCUMENT_PROCESS_CONCURRENCY`, `MAX_FILE_SIZE_MB` (também o limite por arquivo da importação de pasta), `IMPORT_DIR`, `OCR_LANG`, `SYNC_INTERVAL_MIN`.
 - **Geração e busca:** `RETRIEVAL_TOP_K`, `MIN_RELEVANCE_SCORE`, `MAX_CONTEXT_CHARS`, `CONTEXT_ORDER`, `CONVERSATION_ROUTING`, `CONVERSATION_JUDGE_BELOW`, `NEIGHBOR_EXPAND_TOP`, `CHAT_MAX_TOKENS`, `HISTORY_MESSAGES`, `HISTORY_MAX_CHARS` (vazios = perfil do modelo).
 - **Reranking local:** `RERANK_ENABLED`, `RERANK_MODEL`, `RERANK_MODEL_FILE`, `RERANK_CANDIDATES`, `RERANK_TOP_N`, `RERANK_MAX_GAP`, `RERANK_MAX_LENGTH`, `RERANK_BATCH`, `RERANK_THREADS`, `RERANK_DIR`, `RERANK_HF_URL` (ver [Recuperação híbrida](#recuperação-híbrida)).
 - **Infra:** `PORT`, `APP_BIND`, `VOLUMES_DIR`, `APP_UID`/`APP_GID`.
@@ -125,15 +134,20 @@ Tudo em containers (o serviço `tests` usa a imagem com dependências de desenvo
 ```bash
 docker compose --profile test run --rm --no-deps tests npm run test:unit   # determinísticos (chunking, registros, memória…)
 docker compose --profile test run --rm tests npm run test:integration       # integração REAL: Qdrant do Compose + Ollama do Windows
-docker compose --profile test run --rm tests npm run bench -- --label qdrant # benchmark ponta a ponta (39 perguntas com gabarito)
+docker compose --profile test run --rm tests npm run bench -- --label qdrant # benchmark ponta a ponta (47 perguntas com gabarito)
+docker compose --profile test run --rm tests npm run bench -- --retrieval    # só a recuperação (P@K, R@K, MRR), sem gerar: ~1 s/pergunta
 bash scripts/e2e.sh                                                          # API HTTP da aplicação no ar, inclusive reinício dos containers
 ```
 
-Os testes de integração e o benchmark usam collections temporárias (`it_*`, `bench_*`) e SQLite temporário, sem tocar nos dados da aplicação. Cobrem: criação e configuração da collection (denso, esparso, INT8, índices), ingestão com IDs consistentes, payload sem texto, buscas densa/esparsa/por código/isolamento por notebook, pipeline completo com o LLM, reprocessamento idempotente, atualização, exclusão, Ollama indisponível, falha parcial, Qdrant indisponível (exclusão adiada), órfãos, mensagens salvas, troca de modelo e reconstrução total do índice.
+Opções do benchmark ([scripts/bench.mts](scripts/bench.mts)): `--retrieval` mede só a recuperação; `--distract <pasta>` indexa outros documentos no mesmo notebook (até `--distract-mb` MB) para ver como a recuperação se comporta com a base maior; `--variants "A=1;A=2 B=3"` indexa uma vez e repete as perguntas com cada conjunto de variáveis (os vetores BM25 são regravados entre as variantes, sem recalcular embeddings); `--only id1,id2`; `--src` mede outra cópia do código.
+
+Os testes de integração e o benchmark usam collections temporárias (`it_*`, `bench_*`) e SQLite temporário, sem tocar nos dados da aplicação. Cobrem: criação e configuração da collection (denso, esparso, INT8, índices), ingestão com IDs consistentes, payload sem texto, buscas densa/esparsa/por código/isolamento por notebook, pipeline completo com o LLM, reprocessamento idempotente, atualização, exclusão, Ollama indisponível, falha parcial, Qdrant indisponível (exclusão adiada), órfãos, mensagens salvas, troca de modelo, reconstrução total do índice (respondendo pelo BM25 antes dos embeddings), escopo por documento, ajuste de quantização sem recriar e importação de pasta com deduplicação.
 
 ## Uso
 
-Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV, TXT, Markdown, JSON, código, HTML/XML e imagens PNG/JPG/WebP/BMP/TIFF) ou texto colado e aguarde o estado `processed`. É possível selecionar vários arquivos por envio (até 50), cada um de até 100 MB por padrão. Documentos com erro podem ser reprocessados pela interface. Abra uma conversa e pergunte; a primeira troca gera automaticamente um título curto para a conversa. Mensagens salvas podem ser abertas para leitura e também são indexadas como contexto do notebook; remover uma mensagem da lista de salvas não apaga a mensagem original da conversa. A resposta inclui trechos-fontes recuperados. Conversas, documentos e vetores permanecem após reiniciar os containers. Excluir documento remove seus trechos (SQLite), pontos (Qdrant) e o arquivo original; excluir notebook remove seus dados associados nos dois bancos.
+Crie um notebook, adicione arquivos compatíveis (PDF, DOCX, PPTX, XLSX/XLS, CSV, TXT, Markdown, JSON, código, HTML/XML e imagens PNG/JPG/WebP/BMP/TIFF) ou texto colado e aguarde o estado `processed`. É possível selecionar vários arquivos por envio (até 50), cada um de até 100 MB por padrão; arquivos com conteúdo já presente no notebook são ignorados. Para muitos arquivos, use **Pasta**: coloque-os em `IMPORT_DIR` (padrão `./import` na pasta do projeto, uma subpasta por assunto se quiser) e importe; a pasta é varrida com as subpastas, os arquivos são lidos onde estão e excluir o documento no Bento não apaga o original. O documento responde perguntas logo após a fase BM25 (segundos); a busca semântica completa em segundo plano.
+
+**Focar:** no cartão do documento, **Focar** restringe as perguntas aos documentos focados (a faixa acima da caixa de pergunta mostra quais; "Todos os documentos" desfaz). Vale para a busca, os registros estruturados e o modo resumo; fica salvo por notebook no navegador. Documentos com erro podem ser reprocessados pela interface. Abra uma conversa e pergunte; a primeira troca gera automaticamente um título curto para a conversa. Mensagens salvas podem ser abertas para leitura e também são indexadas como contexto do notebook; remover uma mensagem da lista de salvas não apaga a mensagem original da conversa. A resposta inclui trechos-fontes recuperados. Conversas, documentos e vetores permanecem após reiniciar os containers. Excluir documento remove seus trechos (SQLite), pontos (Qdrant) e o arquivo enviado (o importado de pasta fica onde está); excluir notebook remove seus dados associados nos dois bancos.
 
 ## Modo de voz
 
@@ -201,18 +215,46 @@ Medições no Ryzen 7 7735U (8 núcleos, 32 GB), prompt típico do RAG (~1200–
 
 `num_batch` (256–1024) não fez diferença e fica no padrão.
 
+## Capacidade e escala
+
+Não há limite de tamanho por notebook nem no total; os limites são o upload (`MAX_FILE_SIZE_MB` por arquivo, 50 por envio; a importação de pasta não tem limite de quantidade) e o hardware. O modelo de chat nunca lê o notebook inteiro: cada pergunta leva só os trechos mais relevantes (~8.000 caracteres no Qwen3.5-2B), então o tamanho da base não muda o custo da geração.
+
+Custo por trecho (~600 caracteres úteis; 1 página ≈ 5 trechos; 1 MB de texto ≈ 1.700 trechos), com bge-m3:
+
+| Recurso | Por trecho | 100 mil trechos (~20 mil páginas) | 1 milhão de trechos |
+|---|---|---|---|
+| RAM do Qdrant, vetor quantizado `int8` (padrão) | ~1 KB | ~100 MB | ~1 GB |
+| idem com `QDRANT_QUANTIZATION=binary2` / `binary` | ~256 B / ~128 B | ~25 / ~13 MB | ~250 / ~130 MB |
+| Índice BM25 | em disco (memmap) | — | — |
+| Disco (vetor float32 + esparso + SQLite) | ~7–8 KB | ~0,8 GB | ~8 GB |
+
+O gargalo de verdade é o embedding no Ollama (~6 trechos/s com bge-m3 na CPU deste PC: 100 mil trechos ≈ 5 h). Com a indexação em duas fases, isso não bloqueia o uso: tudo fica pesquisável por BM25 em segundos e a busca semântica completa em segundo plano.
+
+Medições do benchmark `--retrieval` (a coluna "Antes" das perguntas vagas é a variante com o BM25 antigo, que se comporta igual ao código anterior nas outras 39) com a base de teste + 1 MB de artigos da Wikipédia em português sobre temas parecidos (34 documentos, 1.992 trechos), 47 perguntas:
+
+| | Antes | Agora |
+|---|---|---|
+| Tempo até ficar pesquisável | 322 s | 3 s (BM25; semântica completa em 320 s, em segundo plano) |
+| P@K / R@K / MRR (39 perguntas originais) | 67,6% / 95,9% / 0,864 | 67,8% / 95,9% / 0,868 |
+| Perguntas vagas novas (sinônimos que não estão no texto) | 8/8 | 8/8 com a evidência recuperada |
+| Termos no índice BM25 por trecho | 55,1 | 49,7 (−10%) |
+
+Testado e **descartado** por não melhorar nada no benchmark: palavra inteira ao lado do radical no BM25 (+55% de índice), bigramas (+92% de índice) e expansão da pergunta pelo LLM quando a busca não acha nada. A busca estrita nunca voltou vazia, e as perguntas vagas já são resolvidas pela busca densa.
+
+Para dimensionar: até alguns GB de texto (milhões de trechos) cabem com `int8` num PC de 16–32 GB; acima disso, `binary2` corta a RAM dos vetores em 4x. No benchmark com 2 mil trechos, `int8`, `binary2` e `binary` deram exatamente a mesma recuperação (P@K 57,0%, R@K 96,7%, MRR 0,803 nas 47 perguntas), graças ao rescore com os originais. Com milhões de trechos e o grafo HNSW a diferença pode aparecer, por isso o padrão continua `int8`: antes de trocar uma base grande, meça com `--variants "QDRANT_QUANTIZATION=int8;QDRANT_QUANTIZATION=binary2"`. Notebooks temáticos dão respostas melhores que um notebook único com tudo; **Focar** restringe a pergunta a alguns documentos.
+
 ## Otimizações gerais
 
 - **Streaming**: a resposta aparece token a token (`POST /api/conversations/:id/messages?stream=1`, NDJSON); sem `stream=1` o comportamento antigo é mantido.
 - **Menos chamadas ao LLM**: cada pergunta faz 1 embedding + 1 geração.
 - **Memória de conversa** (pensada para modelos de 1–4B): perguntas de acompanhamento viram autônomas antes da busca em todos os tamanhos de modelo, inclusive 1B/1.5B. Com pronome ou "e …", o código do item de que se falava é herdado da pergunta ou da resposta anterior sem chamar o LLM ("e o patrocinador dele?" → "e o patrocinador dele (PRJ-ARARA)?"); pedidos como "explique melhor" reaproveitam o assunto anterior; só os casos sem pista são reescritos pelo LLM (do 3B em diante, com validação dos códigos). Os turnos anteriores entram no prompt só do 3B em diante e só em perguntas de acompanhamento (mudança de assunto não paga tokens de histórico); recusas anteriores ficam de fora. `HISTORY_MESSAGES` e `HISTORY_MAX_CHARS` limitam essa janela.
-- **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" amostram trechos de todos os documentos em vez de buscar por similaridade.
+- **Modo resumo**: perguntas como "resuma", "visão geral" ou "principais pontos" não buscam por similaridade. Se ao menos metade dos documentos já tem **resumo guardado** (gerado pelo **One page** ou pelo **Resumir** do documento, tabela `document_summaries`), cada documento entra com o seu resumo, que cobre o documento inteiro; os demais entram com o trecho inicial. Sem resumos, vale a amostra de trechos espalhados de antes. Os resumos valem enquanto o conteúdo do documento não muda, e o One page reaproveita os válidos: gerá-lo de novo num notebook grande só paga os documentos novos ou alterados.
 - **Precisão**: corte relativo de trechos fracos (< 80% do melhor), prompt mais curto e restritivo, `temperature=0.1` e `repeat_penalty`.
 - **Velocidade**: texto normalizado pré-calculado por trecho (`chunks.search_text`), uma única requisição em lote ao Qdrant por busca, textos buscados em lote no SQLite, conexões HTTP reaproveitadas e `keep_alive=30m` no Ollama, evitando recarregar modelos entre embedding e chat.
 
 ## Recuperação híbrida
 
-- **Busca híbrida no Qdrant**: BM25 (vetores esparsos com stemming leve para português, IDF do Qdrant) + similaridade vetorial densa, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings. Detalhes em [Arquitetura de recuperação](#arquitetura-de-recuperação).
+- **Busca híbrida no Qdrant**: BM25 (vetores esparsos com stemming leve para português, palavras funcionais fora do índice, IDF do Qdrant) + similaridade vetorial densa, combinadas por fusão de ranks (RRF). Nomes, siglas e códigos vêm do BM25; paráfrases vêm dos embeddings. Detalhes em [Arquitetura de recuperação](#arquitetura-de-recuperação).
 - **Sem índice em memória**: a memória da aplicação não cresce com o volume de documentos; os vetores ficam no Qdrant (INT8 na RAM, originais em disco).
 - **Portão de relevância**: trecho sem nenhum termo em comum com a pergunta só entra se se destacar estatisticamente dos demais (z-score). Perguntas fora do assunto dos documentos são recusadas sem gastar uma chamada ao modelo de chat.
 - **Reranking local** ([src/rerank.ts](src/rerank.ts)): Cross-Encoder `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` (multilíngue, treinado no mMARCO, que inclui português; int8, ~135 MB) via transformers.js + onnxruntime-node. Medido no container (CPU de 8 núcleos): ~0,8–1 s para 25 trechos em lotes de 4 (`RERANK_BATCH`); ocupa ~380 MB de RAM (tokenizer multilíngue ~115 MB, modelo ~170 MB, inferência ~90 MB). O `onnx-community/bge-reranker-v2-m3-ONNX` (int8, ~570 MB) teve a mesma precisão na base de teste, mas ~11 s por pergunta; use-o só com CPU folgada. O modelo é baixado do Hugging Face na inicialização para `APP_DATA_DIR/reranker`; até terminar, as perguntas seguem sem reranking. Variáveis: `RERANK_ENABLED`, `RERANK_MODEL`, `RERANK_MODEL_FILE`, `RERANK_CANDIDATES` (25), `RERANK_MAX_GAP` (6: segue todo trecho com nota até 6 abaixo da do melhor, sem número fixo; não há piso absoluto porque o Cross-Encoder dá notas baixas a linhas de tabela), `RERANK_TOP_N` (teto opcional; vazio = sem teto, 4 nos modelos < 1B), `RERANK_MAX_LENGTH`, `RERANK_BATCH`, `RERANK_THREADS`, `RERANK_DIR`, `RERANK_HF_URL`. O log mostra `trechos 7 relevantes de 25 (rerank …ms, melhor 9.5) · contexto 6120/8000 chars · prompt ~2900+350 de 8192 tokens (Ollama processou …)`.

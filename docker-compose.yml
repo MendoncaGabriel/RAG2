@@ -18,6 +18,9 @@ x-app-env: &app-env
   QDRANT_OVERSAMPLING: ${QDRANT_OVERSAMPLING:-2}
   QDRANT_HNSW_EF: ${QDRANT_HNSW_EF:-128}
   QDRANT_ON_DISK_VECTORS: ${QDRANT_ON_DISK_VECTORS:-true}
+  QDRANT_QUANTIZATION: ${QDRANT_QUANTIZATION:-int8}
+  QDRANT_QUANTIZED_IN_RAM: ${QDRANT_QUANTIZED_IN_RAM:-true}
+  QDRANT_SPARSE_ON_DISK: ${QDRANT_SPARSE_ON_DISK:-true}
   # Ollama do Windows 11 (IP do Windows visto pelo WSL2; ver scripts/windows/ollama-wsl-bridge.ps1).
   OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?defina OLLAMA_BASE_URL no .env (IP do Windows visto pelo WSL2)}
   OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
@@ -27,6 +30,7 @@ x-app-env: &app-env
   AUTOTUNE: ${AUTOTUNE:-true}
   # Ingestão e chunking.
   OCR_LANG: ${OCR_LANG:-por+eng}
+  IMPORT_PATH: /app/import
   MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-100}
   CHUNK_SIZE: ${CHUNK_SIZE:-700}
   CHUNK_OVERLAP: ${CHUNK_OVERLAP:-100}
@@ -133,6 +137,8 @@ services:
     volumes:
       - ${VOLUMES_DIR:-./volumes}/sqlite:/app/volumes/sqlite
       - ${VOLUMES_DIR:-./volumes}/app:/app/volumes/app
+      # Importação em lote: arquivos lidos onde estão (só leitura; pode ficar em /mnt/c, só os bancos exigem ext4).
+      - ${IMPORT_DIR:-./import}:/app/import:ro
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
 

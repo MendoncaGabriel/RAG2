@@ -37,5 +37,13 @@
   { "id": "seguimento-04", "cat": "seguimento", "prev": ["Qual projeto tem o maior orçamento?"], "q": "Quem é o patrocinador dele?", "must": ["marcos tavares"], "gold": ["PRJ-ORION"] },
   { "id": "seguimento-05", "cat": "seguimento", "prev": ["Qual é o orçamento do PRJ-ARARA?"], "q": "Qual porta TCP o gateway industrial usa para OPC UA?", "must": ["4840"], "mustNot": ["680\\.000"], "gold": ["4840"] },
   { "id": "seguimento-06", "cat": "seguimento", "prev": ["Qual é o risco principal do PRJ-ARARA?"], "q": "explique melhor", "must": ["firmware"], "gold": ["Variação de firmware"] },
-  { "id": "seguimento-07", "cat": "seguimento", "prev": ["Como é calculada a taxa de primeira passagem (FPY)?"], "q": "E as unidades retrabalhadas contam nela?", "must": ["\\bnao\\b"], "gold": ["retrabalhadas e posteriormente aprovadas"] }
+  { "id": "seguimento-07", "cat": "seguimento", "prev": ["Como é calculada a taxa de primeira passagem (FPY)?"], "q": "E as unidades retrabalhadas contam nela?", "must": ["\\bnao\\b"], "gold": ["retrabalhadas e posteriormente aprovadas"] },
+  { "id": "vaga-01", "cat": "vaga", "q": "Recebi um e-mail estranho pedindo minha senha, o que eu faço?", "must": ["7711|seguranca@"], "gold": ["7711"] },
+  { "id": "vaga-02", "cat": "vaga", "q": "Dá para mexer nos sistemas perto do Natal?", "must": ["15 e 31 de dezembro|congelamento"], "gold": ["entre 15 e 31 de dezembro"] },
+  { "id": "vaga-03", "cat": "vaga", "q": "A máquina travou e alguém pode se machucar. Qual é o procedimento?", "must": ["loto-01"], "gold": ["LOTO-01"] },
+  { "id": "vaga-04", "cat": "vaga", "q": "Gastei do meu bolso numa viagem. Até quando posso pedir o dinheiro de volta?", "must": ["30 dias"], "gold": ["Reembolso deve ser solicitado em até 30 dias"] },
+  { "id": "vaga-05", "cat": "vaga", "q": "Posso copiar a base de produção para testar no meu laptop?", "must": ["\\bnao\\b"], "gold": ["notebook pessoal"] },
+  { "id": "vaga-06", "cat": "vaga", "q": "Se acontecer um desastre, quem lidera a parte técnica da retomada?", "must": ["bianca"], "gold": ["Bianca Reis"] },
+  { "id": "vaga-07", "cat": "vaga", "q": "Um fornecedor mandou e-mail trocando a conta para receber. Posso aceitar?", "must": ["canal independente|\\bnao\\b"], "gold": ["canal independente"] },
+  { "id": "vaga-08", "cat": "vaga", "q": "De quanto em quanto tempo contamos as peças mais importantes do almoxarifado?", "must": ["seman"], "gold": ["classe A ocorre semanalmente"] }
 ]

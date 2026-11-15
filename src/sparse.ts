@@ -27,19 +27,27 @@ const toSparse = (weights: Map<number, number>): SparseVector => {
   return { indices: entries.map(e => e[0]), values: entries.map(e => e[1]) };
 };
 
+// Palavras funcionais que só saem do índice BM25 (o roteamento de conversa e a cobertura continuam com stopWords, acima).
+// Sem elas, "uma", "dos", "nao" e a preposição "contra" (mesmo radical de "contrato") pesavam como termos de busca.
+// Medido (benchmark --retrieval com 1 MB de distratores): índice 10% menor (49,7 contra 55,1 termos por trecho) e MRR
+// 0,803 contra 0,799. Palavra inteira ao lado do radical (+55% de índice) e bigramas (+92%) não melhoraram nada e ficaram de fora.
+const indexStopWords = new Set([...stopWords, "uma", "umas", "uns", "dos", "das", "nos", "nas", "num", "numa", "por", "pelas", "pelos", "nao", "sao", "ser", "foi", "sera", "tem", "ter", "tambem", "entre", "contra", "ate", "apos", "desde", "sem", "sob", "seu", "sua", "ele", "ela", "eles", "elas", "lhe", "esse", "esses", "essas", "estes", "estas", "aquele", "aquela", "isto", "aquilo", "muito", "muita", "cada", "outro", "outra", "mesmo", "mesma", "ja", "ainda", "apenas", "pois", "porem", "assim", "entao", "are", "was", "were", "has", "have", "had", "not", "but", "all", "any", "can", "will", "its", "into", "than", "then", "there", "their", "them", "these", "those", "which", "who", "how"]);
+// Termos do índice: radicais das palavras de conteúdo.
+const indexTerms = (normalizedText: string) => (normalizedText.match(/[\p{L}\p{N}]{3,}/gu) || []).filter(w => !indexStopWords.has(w)).map(stem);
+
 // Documento: tf saturado = tf·(k1+1) / (tf + k1·(1 − b + b·len/avgLen)). avgLen é fixo (BM25_AVG_DOC_LEN) para que o peso
 // de um trecho não dependa do que foi indexado antes (indexação incremental e idempotente).
 export function documentSparse(normalizedText: string): SparseVector {
-  const tokens = stemTokens(normalizedText);
+  const terms = indexTerms(normalizedText), length = terms.length;
   const { k1, b, avgLen } = config.bm25;
   const tf = new Map<number, number>();
-  for (const t of tokens) { const i = termIndex(t); tf.set(i, (tf.get(i) || 0) + 1); }
-  const norm = k1 * (1 - b + b * tokens.length / Math.max(1, avgLen));
+  for (const t of terms) { const i = termIndex(t); tf.set(i, (tf.get(i) || 0) + 1); }
+  const norm = k1 * (1 - b + b * length / Math.max(1, avgLen));
   for (const [i, f] of tf) tf.set(i, Math.round(f * (k1 + 1) / (f + norm) * 1e4) / 1e4);
   return toSparse(tf);
 }
 
-// Consulta: cada termo distinto com peso 1 (o IDF vem do Qdrant).
-export function querySparse(stems: string[]): SparseVector {
-  return toSparse(new Map([...new Set(stems)].map(t => [termIndex(t), 1])));
+// Consulta: cada termo distinto com peso 1 (o IDF vem do Qdrant). Recebe o texto normalizado da pergunta.
+export function querySparse(normalizedQuestion: string): SparseVector {
+  return toSparse(new Map([...new Set(indexTerms(normalizedQuestion))].map(t => [termIndex(t), 1])));
 }

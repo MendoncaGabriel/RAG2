@@ -21,7 +21,7 @@ const idx = await import("../../src/indexing.js");
 const docs = await import("../../src/documents.js");
 const rag = await import("../../src/rag.js");
 const { config } = await import("../../src/config.js");
-const { normalizeText, stemTokens } = await import("../../src/sparse.js");
+const { normalizeText } = await import("../../src/sparse.js");
 const corpus = fs.readFileSync(new URL("../fixtures/Base_RAG_Verdanis.md", import.meta.url), "utf8");
 
 const nb = "it-nb", main = "it-doc-main";
@@ -61,6 +61,14 @@ test("ingestão: texto e metadados no SQLite, vetores no Qdrant, IDs consistente
   addDoc(main, "Base_RAG_Verdanis.md");
   const t = Date.now();
   await docs.processDocument(main, nb, null, "Base_RAG_Verdanis.md", corpus);
+  // Fase 1 (BM25): o documento já está pesquisável por palavras antes dos embeddings.
+  const lexicalMs = Date.now() - t;
+  assert.equal(docRow(main)!.status, "processed", docRow(main)!.error ?? "");
+  const [v] = await ai.embedMany(["porta 4840"], "query");
+  const early = await idx.searchCandidates(nb, v, "4840", [], 10);
+  assert.ok(early.sparse.length && textOf(String(early.sparse[0].id)).includes("4840"), "BM25 responde antes da busca semântica");
+  // Fase 2 (denso, em segundo plano).
+  await idx.denseIdle();
   const d = docRow(main)!;
   assert.equal(d.status, "processed", d.error ?? "");
   assert.equal(d.stage, "done");
@@ -71,7 +79,7 @@ test("ingestão: texto e metadados no SQLite, vetores no Qdrant, IDs consistente
   assert.equal(await qd.count(byDoc(main)), chunks.length);
   assert.deepEqual(await pointIds(main), chunks.map(c => c.id).sort());
   assert.ok((db.prepare("SELECT count(*) AS n FROM records WHERE document_id=?").get(main) as { n: number }).n > 20, "registros estruturados");
-  console.info(`  ingestão: ${chunks.length} trechos em ${Date.now() - t} ms`);
+  console.info(`  ingestão: ${chunks.length} trechos; pesquisável por BM25 em ${lexicalMs} ms, busca semântica completa em ${Date.now() - t} ms`);
 });
 
 test("collection: denso (Cosine) + esparso BM25 (IDF), INT8, multitenancy e índices de payload", async () => {
@@ -82,6 +90,7 @@ test("collection: denso (Cosine) + esparso BM25 (IDF), INT8, multitenancy e índ
   assert.equal(p.vectors.dense.distance, "Cosine");
   assert.equal(p.vectors.dense.on_disk, true);
   assert.equal(p.sparse_vectors.bm25.modifier, "idf");
+  assert.equal(p.sparse_vectors.bm25.index?.on_disk, true, "índice BM25 em disco");
   assert.deepEqual(info.config.quantization_config, { scalar: { type: "int8", quantile: 0.99, always_ram: true } });
   assert.equal(info.config.hnsw_config.m, 0);
   assert.equal(info.config.hnsw_config.payload_m, 16);
@@ -95,18 +104,36 @@ test("collection: denso (Cosine) + esparso BM25 (IDF), INT8, multitenancy e índ
 test("busca no Qdrant: densa, esparsa (BM25), por código exato e amostra do notebook", async () => {
   const q = "Qual porta TCP o gateway industrial usa para OPC UA?";
   const [v] = await ai.embedMany([q], "query");
-  const c = await idx.searchCandidates(nb, v, [...new Set(stemTokens(normalizeText(q)))], [], 30);
+  const c = await idx.searchCandidates(nb, v, normalizeText(q), [], 30);
   assert.ok(c.dense.slice(0, 5).some(p => textOf(String(p.id)).includes("4840")), "densa: trecho da porta 4840 no top 5");
   assert.ok(c.sparse.slice(0, 5).some(p => textOf(String(p.id)).includes("4840")), "esparsa: trecho da porta 4840 no top 5");
   assert.equal(c.sample.length, Math.min(256, sqliteChunks(main)));
   // Só lexical: termo raro sem semântica útil.
-  const lex = await idx.searchCandidates(nb, v, ["4840"], [], 10);
+  const lex = await idx.searchCandidates(nb, v, "4840", [], 10);
   assert.ok(textOf(String(lex.sparse[0].id)).includes("4840"), "esparsa: termo exato em primeiro");
-  const code = await idx.searchCandidates(nb, v, [], ["PRJ-ARARA"], 30);
+  const code = await idx.searchCandidates(nb, v, "", ["PRJ-ARARA"], 30);
   assert.ok(code.code.length > 0 && code.code.every(p => textOf(String(p.id)).includes("PRJ-ARARA")), "filtro por código");
   // Outro notebook não enxerga estes trechos.
-  const other = await idx.searchCandidates("outro-notebook", v, ["4840"], [], 10);
+  const other = await idx.searchCandidates("outro-notebook", v, "4840", [], 10);
   assert.equal(other.dense.length + other.sparse.length + other.sample.length, 0);
+  // Escopo por documento: só os documentos escolhidos entram na busca.
+  const scoped = await idx.searchCandidates(nb, v, "4840", [], 10, 256, ["outro-documento"]);
+  assert.equal(scoped.dense.length + scoped.sparse.length + scoped.sample.length, 0);
+  const own = await idx.searchCandidates(nb, v, "4840", [], 10, 256, [main]);
+  assert.ok(own.sparse.length > 0 && own.dense.length > 0);
+});
+
+test("configuração da collection: quantização e índice BM25 ajustados sem recriar", async () => {
+  const before = await qd.count({ must: [{ key: "notebook_id", match: { value: nb } }] });
+  process.env.QDRANT_QUANTIZATION = "binary2";
+  try {
+    assert.ok((await qd.syncCollectionConfig((await qd.getCollection())!)).some(c => /binary2/.test(c)));
+    assert.deepEqual((await qd.getCollection())!.config.quantization_config, { binary: { always_ram: true, encoding: "two_bits" } });
+    assert.deepEqual(await qd.syncCollectionConfig((await qd.getCollection())!), [], "nada a mudar na segunda vez");
+  } finally { delete process.env.QDRANT_QUANTIZATION; }
+  await qd.syncCollectionConfig((await qd.getCollection())!);
+  assert.deepEqual((await qd.getCollection())!.config.quantization_config, { scalar: { type: "int8", quantile: 0.99, always_ram: true } });
+  assert.equal(await qd.count({ must: [{ key: "notebook_id", match: { value: nb } }] }), before, "pontos preservados");
 });
 
 test("pipeline RAG completo: busca híbrida → textos do SQLite → LLM do Windows", async () => {
@@ -122,6 +149,12 @@ test("pipeline RAG completo: busca híbrida → textos do SQLite → LLM do Wind
     assert.ok(r.sources.length > 0, "fontes citadas");
     console.info(`  "${q}" → ${r.answer.slice(0, 80)}… (${Date.now() - t} ms)`);
   }
+  // Escopo: perguntando só a outro documento, a resposta não vem deste.
+  let scoped: any[] = [];
+  await rag.ask(nb, "Qual porta TCP o gateway industrial usa para OPC UA?", { documentIds: ["nao-existe"], retrievalOnly: true, onSources: s => { scoped = s; } });
+  assert.ok(scoped.length > 0, "id desconhecido é ignorado: vale o notebook inteiro");
+  await rag.ask(nb, "Qual porta TCP o gateway industrial usa para OPC UA?", { documentIds: [main], retrievalOnly: true, onSources: s => { scoped = s; } });
+  assert.ok(scoped.some(s => String(s.excerpt).includes("4840")));
 });
 
 test("reprocessar é idempotente: mesmos IDs, sem duplicar pontos", async () => {
@@ -147,22 +180,26 @@ test("exclusão consistente: SQLite e Qdrant", async () => {
   assert.equal(await qd.count(byDoc("it-doc-up")), 0);
 });
 
-test("Ollama indisponível na indexação: falha clara; a reconciliação retoma sem duplicar", async () => {
+test("Ollama indisponível na indexação: documento pesquisável por BM25; a busca semântica retoma sem duplicar", async () => {
   const bad = ai.createProvider({ name: "offline", kind: "ollama", baseUrl: "http://127.0.0.1:9", embeddingModel: config.ollama.embeddingModel });
   ai.setActive({ embedding: bad.id });
   addDoc("it-doc-fail", "falha.md");
   try {
-    await assert.rejects(docs.processDocument("it-doc-fail", nb, null, "falha.md", corpus.slice(20_000, 32_000)), /não foi possível conectar/);
+    await docs.processDocument("it-doc-fail", nb, null, "falha.md", corpus.slice(20_000, 32_000));
+    await idx.denseIdle();
+    assert.match(String(idx.denseStatus().error), /não foi possível conectar/);
   } finally { ai.setActive({ embedding: ai.ENV_PROVIDER_ID }); ai.deleteProvider(bad.id); }
   const d = docRow("it-doc-fail")!;
-  assert.equal(d.status, "failed");
-  assert.equal(d.stage, "index", "trechos já gravados no SQLite");
-  assert.match(d.error!, /Ollama/);
-  assert.ok(sqliteChunks("it-doc-fail") > 0);
+  assert.equal(d.status, "processed", "pesquisável por BM25 mesmo sem o Ollama");
+  assert.equal(d.stage, "dense", "vetores densos pendentes");
+  assert.ok(await consistent("it-doc-fail"), "um ponto por trecho no Qdrant");
+  assert.ok(idx.needsSync(), "a verificação periódica vê a pendência");
   const report = await idx.reconcile();
   assert.ok(report.ok, report.error);
-  assert.ok(report.resumedDocuments.includes("it-doc-fail"));
-  await waitFor(() => consistent("it-doc-fail"), "documento retomado");
+  await idx.denseIdle();
+  assert.equal(docRow("it-doc-fail")!.stage, "done");
+  assert.equal((db.prepare("SELECT count(*) AS n FROM chunks WHERE document_id=? AND indexed<>1").get("it-doc-fail") as { n: number }).n, 0);
+  assert.ok(await consistent("it-doc-fail"));
 });
 
 test("falha parcial (container caiu no meio): só os trechos pendentes são reenviados", async () => {
@@ -175,6 +212,30 @@ test("falha parcial (container caiu no meio): só os trechos pendentes são reen
   assert.ok(report.resumedDocuments.includes("it-doc-fail"));
   await waitFor(() => consistent("it-doc-fail"), "indexação parcial retomada");
   assert.deepEqual(await pointIds("it-doc-fail"), [...ids].sort());
+  await idx.denseIdle();
+  assert.equal(docRow("it-doc-fail")!.stage, "done");
+});
+
+test("importação de pasta: lê os arquivos onde estão, ignora repetidos e formatos não suportados", async () => {
+  const dir = path.join(tmp, "import"), sub = path.join(dir, "manuais");
+  fs.mkdirSync(path.join(sub, "interno"), { recursive: true });
+  fs.writeFileSync(path.join(sub, "a.md"), corpus.slice(50_000, 54_000));
+  fs.writeFileSync(path.join(sub, "interno", "copia-de-a.md"), corpus.slice(50_000, 54_000));
+  fs.writeFileSync(path.join(sub, "foto.xyz"), "x");
+  process.env.IMPORT_PATH = dir;
+  assert.deepEqual(await docs.importFolders(), ["manuais"]);
+  await assert.rejects(docs.importFolder(nb, "../.."), /dentro da pasta de importação/);
+  const r = await docs.importFolder(nb, "manuais");
+  assert.equal(r.added, 1);
+  assert.equal(r.duplicates, 1);
+  assert.deepEqual(r.skipped.map(x => x.reason), ["formato não suportado"]);
+  const imported = db.prepare("SELECT id,external FROM documents WHERE name='a.md'").get() as { id: string; external: number };
+  assert.equal(imported.external, 1);
+  await waitFor(() => consistent(imported.id), "arquivo importado indexado");
+  assert.equal((await docs.importFolder(nb, "manuais")).duplicates, 2, "importar de novo não duplica");
+  // Excluir o documento não apaga o arquivo original do usuário.
+  assert.equal(await docs.removeDocument(imported.id), true);
+  assert.ok(fs.existsSync(path.join(sub, "a.md")));
 });
 
 test("Qdrant indisponível: erro claro na pergunta, exclusão adiada e indexação retomada depois", async () => {
@@ -239,6 +300,9 @@ test("Qdrant vazio (volume perdido): índice reconstruído a partir do SQLite", 
   await waitFor(async () => (await qd.getCollection()) !== null, "collection recriada");
   await waitFor(() => consistent(main), "documento principal reindexado", 600_000);
   await waitFor(() => consistent("it-doc-q"), "segundo documento reindexado");
+  // Reconstruído o BM25, a pergunta já é respondida enquanto a busca semântica ainda está sendo recalculada.
   const again = await rag.ask(nb, "Qual porta TCP o gateway industrial usa para OPC UA?");
   assert.match(again.answer, /4840/);
+  await idx.denseIdle();
+  assert.equal(idx.densePending(), 0);
 });

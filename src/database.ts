@@ -18,14 +18,16 @@ db.exec("PRAGMA busy_timeout = 5000");
 db.exec(`
 CREATE TABLE IF NOT EXISTS notebooks(id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', is_public INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 -- status: processing | processed | failed (contrato da interface)
--- stage: extract (lendo o arquivo) | index (trechos no SQLite, vetores pendentes no Qdrant) | done
+-- stage: extract (lendo o arquivo) | index (trechos no SQLite, vetores pendentes no Qdrant) | dense (pesquisável por BM25,
+--        vetores densos sendo calculados em segundo plano) | done
 -- embedding_model: modelo que gerou os vetores no Qdrant (busca recusa misturar modelos)
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE, name TEXT NOT NULL, type TEXT NOT NULL, path TEXT,
   status TEXT NOT NULL DEFAULT 'processing', stage TEXT NOT NULL DEFAULT 'extract', error TEXT, progress REAL NOT NULL DEFAULT 0, chunks_done INTEGER NOT NULL DEFAULT 0, chunks_total INTEGER NOT NULL DEFAULT 0,
   source_text TEXT, chunk_version INTEGER NOT NULL DEFAULT 0, records_version INTEGER NOT NULL DEFAULT 0, embedding_model TEXT, indexed_at TEXT, created_at TEXT NOT NULL DEFAULT (datetime('now')));
 CREATE INDEX IF NOT EXISTS documents_notebook ON documents(notebook_id, status);
 -- id do trecho = id do ponto no Qdrant (UUID determinístico por documento + posição: reprocessar sobrescreve, não duplica).
--- indexed: 1 quando o ponto correspondente foi gravado no Qdrant (permite retomar a indexação sem refazer o que já foi).
+-- indexed: 0 = fora do Qdrant · 2 = ponto com o vetor BM25 (busca por palavras), denso pendente · 1 = completo (BM25 + denso).
+-- Permite retomar a indexação sem refazer o que já foi.
 CREATE TABLE IF NOT EXISTS chunks(id TEXT PRIMARY KEY, document_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE, notebook_id TEXT NOT NULL REFERENCES notebooks(id) ON DELETE CASCADE,
   chunk_index INTEGER NOT NULL, content TEXT NOT NULL, search_text TEXT NOT NULL, section TEXT, page_start INTEGER, page_end INTEGER, toc INTEGER NOT NULL DEFAULT 0, indexed INTEGER NOT NULL DEFAULT 0,
   UNIQUE(document_id, chunk_index));
@@ -48,7 +50,15 @@ CREATE TABLE IF NOT EXISTS vector_deletions(id INTEGER PRIMARY KEY AUTOINCREMENT
 // Bancos da versão anterior (embeddings em BLOB no SQLite) não são migrados: a arquitetura exige reindexar no Qdrant.
 if ((db.prepare("SELECT count(*) AS n FROM pragma_table_info('chunks') WHERE name='embedding'").get() as { n: number }).n)
   throw new Error(`O banco ${dbPath} é da versão anterior (vetores no SQLite). Aponte SQLITE_PATH para um arquivo novo; os documentos precisam ser enviados de novo.`);
-db.exec("PRAGMA user_version = 3");
+// Migrações aditivas (bancos existentes): hash do conteúdo (envio repetido do mesmo arquivo não duplica o documento) e
+// external = 1 para arquivos importados de uma pasta do servidor (lidos onde estão; excluir o documento não apaga o original).
+const documentColumns = new Set((db.prepare("SELECT name FROM pragma_table_info('documents')").all() as { name: string }[]).map(c => c.name));
+if (!documentColumns.has("content_hash")) db.exec("ALTER TABLE documents ADD COLUMN content_hash TEXT");
+if (!documentColumns.has("external")) db.exec("ALTER TABLE documents ADD COLUMN external INTEGER NOT NULL DEFAULT 0");
+db.exec("CREATE INDEX IF NOT EXISTS documents_hash ON documents(notebook_id, content_hash)");
+// Trechos ainda sem vetor denso (indexed=2), buscados pelo worker de embeddings em segundo plano.
+db.exec("CREATE INDEX IF NOT EXISTS chunks_dense ON chunks(indexed) WHERE indexed=2");
+db.exec("PRAGMA user_version = 4");
 
 // Executa fn numa transação (BEGIN IMMEDIATE evita disputa de escrita entre requisições).
 export function transaction<T>(fn: () => T): T {

@@ -58,6 +58,9 @@ export async function ensureCollection(allowRecreate = false): Promise<{ model: 
     if (info && size && (stored === model || !stored)) {
       // Banco SQLite novo com a collection já existente (mesma dimensão): adota; a reconciliação remove os órfãos.
       if (!stored) { const dims = (await embedMany(["dimensão"], "document"))[0].length; if (dims !== size) return recreate(model, dims, info, allowRecreate); setSetting("vector_model", model); }
+      // Quantização/índice BM25 configurados diferentes dos da collection: ajusta sem recriar (uma falha só gera aviso).
+      try { const changes = await qdrant.syncCollectionConfig(info); if (changes.length) console.info(`[Qdrant] collection "${collection}" ajustada: ${changes.join(", ")} (o Qdrant reconstrói em segundo plano).`); }
+      catch (e) { console.warn(`[Qdrant] não foi possível ajustar a configuração da collection: ${e instanceof Error ? e.message : e}`); }
       ensured = { collection, model, dims: size };
       return { model, dims: size, created: false };
     }
@@ -77,8 +80,9 @@ async function recreate(model: string, dims: number, info: qdrant.CollectionInfo
   // Nada está no Qdrant agora: tudo volta a "pendente". Documentos do mesmo modelo são reconstruídos pela reconciliação.
   transaction(() => { db.exec("UPDATE chunks SET indexed=0"); db.exec("UPDATE saved_messages SET indexed=0"); });
   setSetting("vector_model", model);
+  setSetting("sparse_version", SPARSE_VERSION);
   ensured = { collection, model, dims };
-  console.info(`[Qdrant] collection "${collection}" criada: dense ${dims}d (Cosine, INT8 scalar, originais em disco) + bm25 esparso (IDF).`);
+  console.info(`[Qdrant] collection "${collection}" criada: dense ${dims}d (Cosine, quantização ${config.qdrant.quantization}, originais em disco) + bm25 esparso (IDF, índice ${config.qdrant.sparseOnDisk ? "em disco" : "na RAM"}).`);
   return { model, dims, created: true };
 }
 // Upsert com nova tentativa se a collection sumiu (volume do Qdrant apagado com a aplicação no ar).
@@ -133,15 +137,47 @@ const chunkPayload = (notebookId: string, documentId: string, c: ChunkRow, model
   notebook_id: notebookId, document_id: documentId, source_type: "document", chunk_index: c.chunk_index,
   codes: extractCodes(c.content), toc: !!c.toc, embedding_model: model, ...(c.page_start ? { page: c.page_start } : {}),
 });
+// Versão do vetor BM25 (tokenização/stopwords de sparse.ts). Mudou: a reconciliação regrava só o vetor esparso dos pontos
+// existentes (sem Ollama, milhares de trechos por segundo), sem tocar no denso.
+const SPARSE_VERSION = "2";
+async function refreshSparse(): Promise<number> {
+  if (getSetting("sparse_version") === SPARSE_VERSION) return 0;
+  let done = 0;
+  const update = async (points: { id: string; vector: Record<string, any> }[]) => {
+    try { await qdrant.updateVectors(points); }
+    catch (e) {
+      if (!(e instanceof qdrant.QdrantError) || !/ 404 /.test(e.message)) throw e;
+      for (const p of points) await qdrant.updateVectors([p]).catch(err => { if (!(err instanceof qdrant.QdrantError) || !/ 404 /.test(err.message)) throw err; });
+    }
+  };
+  const page = db.prepare("SELECT rowid,id,search_text FROM chunks WHERE indexed<>0 AND rowid>? ORDER BY rowid LIMIT 512");
+  for (let last = 0; ;) {
+    const rows = page.all(last) as { rowid: number; id: string; search_text: string }[];
+    if (!rows.length) break;
+    await update(rows.map(r => ({ id: r.id, vector: { [qdrant.SPARSE]: documentSparse(r.search_text) } })));
+    last = rows[rows.length - 1].rowid; done += rows.length;
+  }
+  const saved = db.prepare("SELECT s.id,m.content FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.indexed=1").all() as { id: string; content: string }[];
+  for (let i = 0; i < saved.length; i += 512) await update(saved.slice(i, i + 512).map(r => ({ id: r.id, vector: { [qdrant.SPARSE]: documentSparse(normalizeText(r.content)) } })));
+  setSetting("sparse_version", SPARSE_VERSION);
+  return done + saved.length;
+}
 const sparseOf = (normalized: string): Record<string, SparseVector> => { const s = documentSparse(normalized); return s.indices.length ? { [qdrant.SPARSE]: s } : {}; };
 
-// Envia ao Qdrant os trechos pendentes (indexed=0) do documento, em lotes, e conclui o documento. Retomável e idempotente.
+// Indexação em duas fases (a busca por palavras fica pronta em segundos; a semântica chega depois):
+//  1) BM25 (indexDocument): os trechos pendentes (indexed=0) vão ao Qdrant só com o vetor esparso e o payload, em lotes grandes,
+//     sem chamar o Ollama → indexed=2 e o documento já fica 'processed' (pesquisável), com stage='dense'.
+//  2) Denso (worker em segundo plano, um por processo): calcula os embeddings dos trechos com indexed=2, em ordem de chegada dos
+//     documentos, e atualiza só o vetor denso do ponto → indexed=1; sem pendências o documento passa a stage='done'.
+//     O worker cede a vez às perguntas (o embedding da pergunta não espera atrás de uma fila de lotes) e para quando o
+//     Ollama/Qdrant caem; a reconciliação periódica o retoma. Enquanto o denso não chega, a busca usa o BM25 + reranking.
+const LEXICAL_BATCH = 256;
 // base: progresso já usado pela extração (0–25%). Retorna false se o documento foi excluído no meio.
 export async function indexDocument(documentId: string, base = 0): Promise<boolean> {
   const doc = db.prepare("SELECT notebook_id,name FROM documents WHERE id=?").get(documentId) as { notebook_id: string; name: string } | undefined;
   if (!doc) return false;
   try {
-    const { model, dims } = await ensureCollection(true);
+    const { model } = await ensureCollection(true);
     const total = (db.prepare("SELECT count(*) AS n FROM chunks WHERE document_id=?").get(documentId) as { n: number }).n;
     if (!total) throw new Error("Nenhum trecho para indexar; use Reprocessar.");
     db.prepare("UPDATE documents SET status='processing',stage='index',error=NULL,chunks_total=? WHERE id=?").run(total, documentId);
@@ -150,14 +186,12 @@ export async function indexDocument(documentId: string, base = 0): Promise<boole
     const pending = db.prepare("SELECT id,chunk_index,content,search_text,section,page_start,page_end,toc FROM chunks WHERE document_id=? AND indexed=0 ORDER BY chunk_index").all(documentId) as ChunkRow[];
     let done = total - pending.length;
     const progress = db.prepare("UPDATE documents SET progress=?,chunks_done=? WHERE id=?");
-    const mark = db.prepare("UPDATE chunks SET indexed=1 WHERE id=?");
+    const mark = db.prepare("UPDATE chunks SET indexed=2 WHERE id=? AND indexed=0");
     progress.run(Math.round((base + done / total * (99 - base)) * 10) / 10, done, documentId);
-    for (let i = 0; i < pending.length; i += embedBatch()) {
+    for (let i = 0; i < pending.length; i += LEXICAL_BATCH) {
       if (!alive(documentId)) break;
-      const batch = pending.slice(i, i + embedBatch());
-      const vectors = await embedUnique(batch.map(c => embeddingInput(doc.name, c.content)));
-      if (vectors.some(v => v.length !== dims)) throw new Error(`Dimensão de embedding inconsistente (esperado ${dims}). O modelo ${model} mudou?`);
-      await upsertPoints(batch.map((c, k) => ({ id: c.id, vector: { [qdrant.DENSE]: vectors[k], ...sparseOf(c.search_text) }, payload: chunkPayload(doc.notebook_id, documentId, c, model) })));
+      const batch = pending.slice(i, i + LEXICAL_BATCH);
+      await upsertPoints(batch.map(c => ({ id: c.id, vector: sparseOf(c.search_text), payload: chunkPayload(doc.notebook_id, documentId, c, model) })));
       transaction(() => { for (const c of batch) mark.run(c.id); });
       done += batch.length;
       progress.run(Math.round((base + done / total * (99 - base)) * 10) / 10, done, documentId);
@@ -166,12 +200,65 @@ export async function indexDocument(documentId: string, base = 0): Promise<boole
     if (!alive(documentId)) { await deleteDocumentVectors(documentId); return false; }
     const left = (db.prepare("SELECT count(*) AS n FROM chunks WHERE document_id=? AND indexed=0").get(documentId) as { n: number }).n;
     if (left) throw new Error(`${left} trecho(s) não foram indexados.`);
-    db.prepare("UPDATE documents SET status='processed',stage='done',progress=100,chunks_done=?,error=NULL,embedding_model=?,indexed_at=datetime('now') WHERE id=?").run(total, model, documentId);
+    // Pesquisável por BM25: a interface mostra o avanço da busca semântica (chunks_done = trechos com vetor denso).
+    const dense = (db.prepare("SELECT count(*) AS n FROM chunks WHERE document_id=? AND indexed=1").get(documentId) as { n: number }).n;
+    db.prepare("UPDATE documents SET status='processed',stage=?,progress=100,chunks_done=?,error=NULL,embedding_model=?,indexed_at=datetime('now') WHERE id=?").run(dense < total ? "dense" : "done", dense, model, documentId);
+    kickDense();
     return true;
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     db.prepare("UPDATE documents SET status='failed',error=? WHERE id=?").run(`Falha na indexação (os trechos estão salvos; será retomada quando o serviço voltar ou com Reprocessar): ${message}`, documentId);
     throw e;
+  }
+}
+
+// ---------- Vetores densos em segundo plano ----------
+let denseLoop: Promise<void> | null = null, denseAgain = false, denseError = "";
+const denseWaiters: (() => void)[] = [];
+// Perguntas em andamento: o worker espera entre lotes para o embedding da pergunta não disputar o Ollama com a indexação.
+let asking = 0;
+export async function withQuestion<T>(run: () => Promise<T>): Promise<T> { asking++; try { return await run(); } finally { asking--; } }
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+export const densePending = () => (db.prepare("SELECT count(*) AS n FROM chunks WHERE indexed=2").get() as { n: number }).n;
+export const denseStatus = () => ({ running: !!denseLoop, pending: densePending(), error: denseError || undefined });
+// Inicia o worker (se não estiver rodando). Seguro chamar a qualquer momento.
+export function kickDense() {
+  if (denseLoop) { denseAgain = true; return; }
+  denseLoop = runDense().catch(e => { denseError = e instanceof Error ? e.message : String(e); console.warn(`[Indexação] busca semântica pausada: ${denseError}. Será retomada na próxima sincronização.`); })
+    .finally(() => { denseLoop = null; if (denseAgain && !denseError) { denseAgain = false; kickDense(); } else { denseAgain = false; while (denseWaiters.length) denseWaiters.shift()!(); } });
+}
+// Resolve quando não há mais trechos sem vetor denso (ou o worker parou por erro). Usado pelos testes e pelo benchmark.
+export function denseIdle(): Promise<void> {
+  if (!denseLoop && !densePending()) return Promise.resolve();
+  if (!denseLoop) kickDense();
+  return new Promise(r => denseWaiters.push(r));
+}
+type DenseRow = { id: string; document_id: string; content: string; name: string };
+async function runDense() {
+  denseError = "";
+  const next = db.prepare(`SELECT c.id,c.document_id,c.content,d.name FROM chunks c JOIN documents d ON d.id=c.document_id
+    WHERE c.indexed=2 AND d.status='processed' AND d.embedding_model=? ORDER BY d.created_at,c.document_id,c.chunk_index LIMIT ?`);
+  const mark = db.prepare("UPDATE chunks SET indexed=1 WHERE id=? AND indexed=2 AND content=?");
+  const finish = db.prepare(`UPDATE documents SET chunks_done=(SELECT count(*) FROM chunks c WHERE c.document_id=documents.id AND c.indexed=1),
+    stage=CASE WHEN EXISTS(SELECT 1 FROM chunks c WHERE c.document_id=documents.id AND c.indexed<>1) THEN stage ELSE 'done' END WHERE id=? AND status='processed' AND stage='dense'`);
+  for (;;) {
+    while (asking > 0) await pause(150);
+    // Só trechos de documentos do modelo de embeddings ativo: os de outro modelo esperam o "Reindexar" (nunca misturar modelos).
+    if (!db.prepare("SELECT 1 FROM chunks WHERE indexed=2 LIMIT 1").get()) return;
+    const { model, dims } = await ensureCollection(false);
+    const batch = next.all(model, embedBatch()) as DenseRow[];
+    if (!batch.length) return;
+    const vectors = await embedUnique(batch.map(r => embeddingInput(r.name, r.content)));
+    if (vectors.some(v => v.length !== dims)) throw new Error(`Dimensão de embedding inconsistente (esperado ${dims}). O modelo ${model} mudou?`);
+    const points = batch.map((r, k) => ({ id: r.id, vector: { [qdrant.DENSE]: vectors[k] } }));
+    try { await qdrant.updateVectors(points); }
+    catch (e) {
+      // Documento excluído/reprocessado no meio do lote: o ponto sumiu. Atualiza um a um e ignora os que não existem mais.
+      if (!(e instanceof qdrant.QdrantError) || !/ 404 /.test(e.message)) throw e;
+      for (const p of points) await qdrant.updateVectors([p]).catch(err => { if (!(err instanceof qdrant.QdrantError) || !/ 404 /.test(err.message)) throw err; });
+    }
+    // Só marca se o trecho não mudou enquanto o embedding era calculado (reprocessamento): senão ele volta na próxima volta.
+    transaction(() => { for (const r of batch) mark.run(r.id, r.content); for (const id of new Set(batch.map(r => r.document_id))) finish.run(id); });
   }
 }
 
@@ -214,15 +301,17 @@ export type Candidates = { dense: qdrant.ScoredPoint[]; sparse: qdrant.ScoredPoi
 //  code   — trechos que contêm os códigos exatos citados (índice de payload "codes"), ordenados pela similaridade;
 //  sample — amostra aleatória re-pontuada pela similaridade: estima média e desvio do notebook para o z-score da relevância.
 // Sumários (toc) ficam fora das listas densa e esparsa, como antes; entram só por código exato.
-export async function searchCandidates(notebookId: string, dense: number[], stems: string[], codes: string[], pool: number, sampleSize = 256): Promise<Candidates> {
-  const params = qdrant.searchParams();
+// scope: só estes documentos (o usuário escolheu em quais documentos perguntar); vazio = o notebook inteiro.
+const scopeFilter = (scope?: string[] | null) => scope?.length ? [{ key: "document_id", match: { any: scope } }] : [];
+export async function searchCandidates(notebookId: string, dense: number[], lexicalQuery: string, codes: string[], pool: number, sampleSize = 256, scope?: string[] | null): Promise<Candidates> {
+  const params = qdrant.searchParams(), inScope = scopeFilter(scope);
   const searches: unknown[] = [
-    { query: dense, using: qdrant.DENSE, limit: pool, filter: notebookFilter(notebookId, [], notToc), params },
-    { prefetch: { query: { sample: "random" }, limit: sampleSize, filter: notebookFilter(notebookId) }, query: dense, using: qdrant.DENSE, limit: sampleSize },
+    { query: dense, using: qdrant.DENSE, limit: pool, filter: notebookFilter(notebookId, inScope, notToc), params },
+    { prefetch: { query: { sample: "random" }, limit: sampleSize, filter: notebookFilter(notebookId, inScope) }, query: dense, using: qdrant.DENSE, limit: sampleSize },
   ];
-  const sparse = querySparse(stems);
-  if (sparse.indices.length) searches.push({ query: sparse, using: qdrant.SPARSE, limit: pool, filter: notebookFilter(notebookId, [], notToc) });
-  if (codes.length) searches.push({ query: dense, using: qdrant.DENSE, limit: pool, filter: notebookFilter(notebookId, [{ key: "codes", match: { any: codes } }]), params });
+  const sparse = querySparse(lexicalQuery);
+  if (sparse.indices.length) searches.push({ query: sparse, using: qdrant.SPARSE, limit: pool, filter: notebookFilter(notebookId, inScope, notToc) });
+  if (codes.length) searches.push({ query: dense, using: qdrant.DENSE, limit: pool, filter: notebookFilter(notebookId, [...inScope, { key: "codes", match: { any: codes } }]), params });
   const out = await qdrant.queryBatch(searches);
   return { dense: out[0], sample: out[1].map(p => p.score), sparse: sparse.indices.length ? out[2] : [], code: codes.length ? out[sparse.indices.length ? 3 : 2] : [] };
 }
@@ -240,7 +329,7 @@ export const lastSyncReport = () => lastReport;
 // Há trabalho pendente que a reconciliação resolve? (consulta barata ao SQLite, usada pela verificação periódica)
 export function needsSync(): boolean {
   const failed = db.prepare("SELECT id FROM documents WHERE status='failed' AND stage='index'").all() as { id: string }[];
-  return failed.some(d => !isBusy(d.id)) || !!db.prepare("SELECT 1 FROM vector_deletions LIMIT 1").get();
+  return failed.some(d => !isBusy(d.id)) || !!db.prepare("SELECT 1 FROM vector_deletions LIMIT 1").get() || (!denseLoop && !!db.prepare("SELECT 1 FROM chunks WHERE indexed=2 LIMIT 1").get());
 }
 
 export async function reconcile(): Promise<SyncReport> {
@@ -292,6 +381,11 @@ export async function reconcile(): Promise<SyncReport> {
     const orphanSaved = [...seen].filter(id => !saved.has(id));
     if (orphanSaved.length) { await qdrant.deleteIds(orphanSaved); report.orphanPoints += orphanSaved.length; }
     for (const s of saved.values()) if (s.indexed && !seen.has(s.id)) { db.prepare("UPDATE saved_messages SET indexed=0 WHERE id=?").run(s.id); report.savedMessagesRequeued++; }
+    // 4) Vetores BM25 de uma versão anterior da tokenização: regravados (só o esparso).
+    const resparsed = await refreshSparse();
+    if (resparsed) console.info(`[Sync] índice BM25 atualizado para a versão ${SPARSE_VERSION}: ${resparsed} ponto(s).`);
+    // 5) Vetores densos que ficaram pendentes (reinício, Ollama fora): o worker retoma em segundo plano.
+    kickDense();
     report.ok = true;
   } catch (e) {
     report.error = e instanceof Error ? e.message : String(e);

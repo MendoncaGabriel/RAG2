@@ -3,6 +3,7 @@ import path from "node:path";
 import { chat } from "./ai.js";
 import { dataDir, db } from "./database.js";
 import { chatContext, generationProfile, redactInjection } from "./rag.js";
+import { cachedSummary, saveSummary } from "./summaries.js";
 
 // Resumo "one page" de todos os documentos do notebook: um resumo por documento (map) e uma visão geral sobre eles (reduce),
 // montados em um HTML A4 autônomo para download (abre no navegador; Ctrl+P salva em PDF).
@@ -108,7 +109,10 @@ export function startOnePage(notebookId: string): OnePageJob {
       if (!unique.length) throw new Error("Não há documentos processados neste notebook.");
       const budget = generationProfile().contextChars, items: DocSummary[] = [];
       for (const d of unique) {
-        try { items.push({ name: d.name, ...(await summarizeDocument(d.name, sampleText(d.id, budget))) }); }
+        // Resumo já gerado e o documento não mudou: reaproveitado (gerar de novo um notebook grande só paga os documentos novos).
+        const cached = cachedSummary(d.id);
+        if (cached) { items.push({ name: d.name, lead: cached.lead, bullets: cached.bullets.slice(0, 5) }); job.done++; continue; }
+        try { const s = await summarizeDocument(d.name, sampleText(d.id, budget)); saveSummary(d.id, s); items.push({ name: d.name, ...s }); }
         catch (e) { console.warn("One page:", d.name, e instanceof Error ? e.message : String(e)); items.push({ name: d.name, lead: "", bullets: [], failed: true }); }
         job.done++;
       }
@@ -199,6 +203,8 @@ export function startDocumentSummary(documentId: string): OnePageJob {
       if (out.every(q => q.failed)) throw new Error("O modelo de chat não respondeu. Verifique o provedor ativo em Configurações.");
       let intro = "";
       try { intro = await overview(out.filter(q => !q.failed).map(q => ({ name: q.title || "Parte", lead: q.lead, bullets: q.bullets })), doc.name); } catch (e) { console.warn("Resumo do documento (visão geral):", e instanceof Error ? e.message : String(e)); }
+      // O resumo do documento inteiro (visão geral + assunto de cada parte) passa a ser o resumo guardado deste documento.
+      if (intro) saveSummary(documentId, { lead: intro, bullets: out.filter(q => !q.failed && q.lead).slice(0, 8).map(q => q.lead) }, true);
       await fs.mkdir(reportsDir, { recursive: true });
       job.file = onePageFile(key);
       await fs.writeFile(job.file, renderDocument(doc.name, intro, out, parts.length), "utf8");

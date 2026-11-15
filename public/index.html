@@ -150,8 +150,9 @@
             <button id="addFile" class="btn btn-primary w-full"><i data-lucide="upload" class="h-4 w-4"></i>Enviar arquivos</button>
             <p class="mt-2 text-xs text-ink-muted">ou arraste arquivos para cá</p>
           </div>
-          <div class="grid grid-cols-3 gap-2">
+          <div class="grid grid-cols-4 gap-2">
             <button id="addText" class="tool-btn" title="Colar um texto como documento"><i data-lucide="file-text" class="h-4 w-4"></i><span>Texto</span></button>
+            <button id="importFolder" class="tool-btn" title="Importa em lote os arquivos de uma pasta do servidor (IMPORT_DIR), sem copiá-los; arquivos repetidos são ignorados"><i data-lucide="folder-input" class="h-4 w-4"></i><span>Pasta</span></button>
             <button id="onePage" class="tool-btn" title="Gera um resumo detalhado, em uma página (A4), de todos os documentos para download"><i data-lucide="file-down" class="h-4 w-4"></i><span>One page</span></button>
             <button id="reindex" class="tool-btn" title="Recalcula os vetores de todos os documentos e mensagens salvas com o modelo de embeddings atual"><i data-lucide="refresh-cw" class="h-4 w-4"></i><span>Reindexar</span></button>
           </div>
@@ -165,6 +166,7 @@
       <section data-panel="chat" class="panel" aria-label="Conversa">
         <div class="panel-head"><div class="flex min-w-0 items-center gap-2"><i data-lucide="messages-square" class="h-4 w-4 shrink-0 text-jabil-medium"></i><h2 id="chatTitle" class="truncate font-semibold text-heading">Conversa</h2></div><button id="newChat" class="btn btn-secondary btn-sm"><i data-lucide="plus" class="h-4 w-4"></i><span>Nova conversa</span></button></div>
         <div id="messages" class="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-canvas p-3 sm:p-5"></div>
+        <div id="focusBar" class="hidden shrink-0 items-center gap-2 border-t border-line bg-canvas px-4 py-1.5 text-xs text-ink-muted"><i data-lucide="crosshair" class="h-3.5 w-3.5 shrink-0 text-jabil-medium"></i><span id="focusText" class="min-w-0 flex-1 truncate"></span><button type="button" id="focusClear" class="btn btn-ghost btn-sm">Todos os documentos</button></div>
         <form id="askForm" class="shrink-0 border-t border-line bg-surface p-3 sm:p-4">
           <div class="rounded-xl border border-line bg-surface transition-shadow focus-within:border-jabil-light focus-within:ring-2 focus-within:ring-jabil-light/25">
             <label for="question" class="sr-only">Pergunta</label>

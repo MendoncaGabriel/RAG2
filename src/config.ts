@@ -14,17 +14,31 @@ export const config = {
   // Arquivos da aplicação: uploads, relatórios, dados de OCR, modelos de voz e ajuste do Ollama.
   dataDir: path.resolve(str("APP_DATA_DIR", "./volumes/app")),
   get uploadDir() { return path.resolve(str("UPLOAD_DIR", path.join(this.dataDir, "uploads"))); },
+  // Pasta do servidor de onde a importação em lote lê arquivos (no Compose: IMPORT_DIR do host montada só leitura em /app/import).
+  get importPath() { return str("IMPORT_PATH", "/app/import"); },
   // Qdrant: recuperação vetorial (densa + esparsa).
   qdrant: {
     url: trimSlash(str("QDRANT_URL", "http://qdrant:6333")),
     apiKey: str("QDRANT_API_KEY"),
     get collection() { return str("QDRANT_COLLECTION", "rag_chunks"); },
     timeoutMs: num("QDRANT_TIMEOUT_MS", 30_000),
-    // Quantização escalar INT8: vetores int8 na RAM; originais (float32) no disco para o rescore.
+    // Quantização dos vetores densos (cópia compacta usada na busca; originais float32 no disco para o rescore):
+    //  int8    — 1 byte por dimensão (~1 KB por trecho com bge-m3), a mais precisa (padrão);
+    //  binary2 — 2 bits por dimensão (~256 B por trecho, 4x menos RAM que int8);
+    //  binary  — 1 bit por dimensão (~128 B por trecho, 8x menos RAM que int8), para bases muito grandes.
+    // Trocar vale para a collection existente (o Qdrant reconstrói a quantização em segundo plano, sem reindexar).
+    get quantization() { const q = str("QDRANT_QUANTIZATION", "int8").toLowerCase(); return (["int8", "binary", "binary2"].includes(q) ? q : "int8") as "int8" | "binary" | "binary2"; },
+    // Vetores quantizados na RAM (rápido). false = no disco (mmap): menos RAM, buscas mais lentas em disco lento.
+    get quantizedInRam() { return str("QDRANT_QUANTIZED_IN_RAM", "true") !== "false"; },
     quantile: num("QDRANT_QUANTILE", 0.99),
-    oversampling: num("QDRANT_OVERSAMPLING", 2),
+    // Quantas vezes mais candidatos a busca quantizada pré-seleciona para o rescore com os originais. Binária perde mais
+    // precisão na pré-seleção: usa no mínimo 4.
+    get oversampling() { const o = num("QDRANT_OVERSAMPLING", 2); return this.quantization === "int8" ? o : Math.max(4, o); },
     hnswEf: num("QDRANT_HNSW_EF", 128),
     onDiskVectors: str("QDRANT_ON_DISK_VECTORS", "true") !== "false",
+    // Índice invertido do BM25 em disco (mmap; o cache de páginas do sistema mantém quente o que é usado): a RAM não cresce
+    // com o vocabulário da base. false = índice inteiro na RAM.
+    get sparseOnDisk() { return str("QDRANT_SPARSE_ON_DISK", "true") !== "false"; },
   },
   // Ollama no Windows 11 (fora do Docker). Modelos separados: LLM e embeddings.
   ollama: {

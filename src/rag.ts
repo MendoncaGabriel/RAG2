@@ -4,9 +4,10 @@ import { activeProvider, cachedModelInfo, chat, embedMany, refreshModelInfo } fr
 import { deriveProfile, isCompact } from "./modelprofile.js";
 import { analyzeQuery, extractCodes, structuredQuery, type QueryIntent, type Source } from "./structured.js";
 import { normalizeText, stemTokens, stopWords } from "./sparse.js";
-import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel } from "./indexing.js";
+import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel, withQuestion } from "./indexing.js";
 import { QdrantError } from "./qdrant.js";
 import { conversationRoute, withoutSmallTalk } from "./smalltalk.js";
+import { summaryItems } from "./summaries.js";
 import { prepareReranker, rerankCandidates, rerankEnabled, rerankMaxGap, rerankOrder, rerankScores, rerankTopN } from "./rerank.js";
 
 export { normalizeText, prepareReranker };
@@ -23,7 +24,11 @@ export type HistoryMessage = { role: string; content: string };
 // Contagem mostrada na interface enquanto a IA pensa: trechos que a busca achou (passaram no portão de relevância) e quantos
 // entraram no prompt depois do ranqueamento (reranking + corte de relevância + orçamento de contexto).
 export type RetrievalStats = { found: number; used: number; reranked: boolean };
-export type AskOptions = { history?: HistoryMessage[]; onToken?: (token: string) => void; onSources?: (sources: any[], stats?: RetrievalStats) => void; signal?: AbortSignal; detailed?: boolean; creative?: boolean; conversational?: boolean };
+export type AskOptions = { history?: HistoryMessage[]; onToken?: (token: string) => void; onSources?: (sources: any[], stats?: RetrievalStats) => void; signal?: AbortSignal; detailed?: boolean; creative?: boolean; conversational?: boolean;
+  // Só a recuperação (benchmark): devolve depois de onSources, sem gerar a resposta.
+  retrievalOnly?: boolean;
+  // Perguntar só a estes documentos do notebook (escolhidos na interface); vazio = todos.
+  documentIds?: string[] };
 
 // Memória da conversa para modelos locais de 1–4B (CPU, prompt curto). O histórico serve a duas coisas, tratadas em separado:
 //  1) BUSCA (todos os tamanhos, inclusive 1B/1.5B): a pergunta de acompanhamento vira autônoma antes de buscar
@@ -141,8 +146,9 @@ ${topic && topic !== lastUser ? `Assunto: ${topic}\n` : ""}${recent}
 }
 
 // Perguntas de resumo não casam com nenhum trecho específico: amostra trechos espalhados por todos os documentos.
-function summarySample(notebookId: string, limit: number) {
-  const docs = db.prepare("SELECT d.id,d.name,(SELECT count(*) FROM chunks c WHERE c.document_id=d.id) AS n FROM documents d WHERE d.notebook_id=? AND d.status='processed' ORDER BY d.created_at").all(notebookId) as { id: string; name: string; n: number }[];
+function summarySample(notebookId: string, limit: number, scope?: string[] | null) {
+  const docs = (db.prepare("SELECT d.id,d.name,(SELECT count(*) FROM chunks c WHERE c.document_id=d.id) AS n FROM documents d WHERE d.notebook_id=? AND d.status='processed' ORDER BY d.created_at").all(notebookId) as { id: string; name: string; n: number }[])
+    .filter(d => !scope?.length || scope.includes(d.id));
   const withChunks = docs.filter(d => d.n > 0).slice(0, limit);
   const perDoc = Math.max(1, Math.floor(limit / Math.max(1, withChunks.length)));
   const pick = db.prepare("SELECT id,content,chunk_index FROM chunks WHERE document_id=? ORDER BY chunk_index LIMIT 1 OFFSET ?");
@@ -154,7 +160,7 @@ function summarySample(notebookId: string, limit: number) {
       if (row) out.push({ ...row, document_name: d.name, source_type: "document", document_id: d.id, score: 1 });
     }
   }
-  const saved = db.prepare("SELECT s.message_id AS id,m.content,s.title FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? ORDER BY s.created_at DESC LIMIT 2").all(notebookId) as { id: string; content: string; title: string }[];
+  const saved = scope?.length ? [] : db.prepare("SELECT s.message_id AS id,m.content,s.title FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? ORDER BY s.created_at DESC LIMIT 2").all(notebookId) as { id: string; content: string; title: string }[];
   for (const s of saved) out.push({ id: s.id, content: s.content, chunk_index: 0, document_name: `Mensagem salva: ${s.title}`, source_type: "saved_message", document_id: null, score: 1 });
   return out;
 }
@@ -162,16 +168,17 @@ function summarySample(notebookId: string, limit: number) {
 // ---------- Recuperação híbrida no Qdrant (denso + BM25 esparso, fusão RRF) ----------
 // O Qdrant devolve IDs e pontuações; textos e metadados vêm do SQLite em lote. O ranqueamento final (RRF ponderado pela
 // cobertura dos termos, códigos exatos, período citado, z-score da similaridade) é o mesmo da versão em memória.
-type Candidate = { id: string; content: string; text: string; section: string | null; page: number | null; document_id: string | null; document_name: string; created_at: string | null; chunk_index: number; source_type: string };
+// dense: 0 enquanto o vetor denso do trecho ainda está sendo calculado (indexação em duas fases, ver indexing.ts).
+type Candidate = { id: string; content: string; text: string; section: string | null; page: number | null; document_id: string | null; document_name: string; created_at: string | null; chunk_index: number; source_type: string; dense: number };
 // Textos e metadados dos pontos devolvidos pelo Qdrant, em lote, só de documentos já processados. Pontos sem linha no SQLite
 // (órfãos, documentos em reprocessamento) são ignorados. A chave é o ID do ponto; o id de mensagem salva é o da mensagem.
 function loadCandidates(pointIds: string[]): Map<string, Candidate> {
   const out = new Map<string, Candidate>();
   for (let i = 0; i < pointIds.length; i += 500) {
     const part = pointIds.slice(i, i + 500), marks = part.map(() => "?").join(",");
-    for (const r of db.prepare(`SELECT c.id,c.content,c.search_text AS text,c.section,c.page_start AS page,c.document_id,d.name AS document_name,d.created_at,c.chunk_index,'document' AS source_type FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.id IN (${marks}) AND d.status='processed'`).all(...part) as Candidate[]) out.set(r.id, r);
+    for (const r of db.prepare(`SELECT c.id,c.content,c.search_text AS text,c.section,c.page_start AS page,c.document_id,d.name AS document_name,d.created_at,c.chunk_index,'document' AS source_type,(c.indexed=1) AS dense FROM chunks c JOIN documents d ON d.id=c.document_id WHERE c.id IN (${marks}) AND d.status='processed'`).all(...part) as Candidate[]) out.set(r.id, r);
     for (const r of db.prepare(`SELECT s.id AS point_id,s.message_id AS id,m.content,s.created_at,('Mensagem salva: ' || s.title) AS document_name FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.id IN (${marks})`).all(...part) as any[])
-      out.set(r.point_id, { id: r.id, content: r.content, text: normalizeText(r.content), section: null, page: null, document_id: null, document_name: r.document_name, created_at: r.created_at, chunk_index: 0, source_type: "saved_message" });
+      out.set(r.point_id, { id: r.id, content: r.content, text: normalizeText(r.content), section: null, page: null, document_id: null, document_name: r.document_name, created_at: r.created_at, chunk_index: 0, source_type: "saved_message", dense: 1 });
   }
   return out;
 }
@@ -184,7 +191,9 @@ const definitionIntent = /^\s*(o que (e|sao|significa|faz)|que e|quem (e|sao)|de
 // rerankN > 0: os RERANK_CANDIDATES (25) melhores que passaram no portão de relevância são reordenados pelo Cross-Encoder local
 // (rerank.ts) e seguem todos os que passam no corte de relevância (RERANK_MAX_GAP; no máximo rerankN), do mais
 // relevante para o menos relevante. Sem o modelo pronto, vale a ordem da busca com topK.
-async function hybridSearch(notebookId: string, question: string, queryVector: number[], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false, rerankN = 0) {
+// opts.scope: só estes documentos (escolhidos pelo usuário); vazio = o notebook inteiro.
+type SearchOptions = { scope?: string[] | null };
+async function hybridSearch(notebookId: string, question: string, queryVector: number[], topK: number, intent: QueryIntent = analyzeQuery(question), relaxed = false, rerankN = 0, opts: SearchOptions = {}) {
   const minRelevance = Number(process.env.MIN_RELEVANCE_SCORE ?? 0.48);
   const threshold = Number.isFinite(minRelevance) ? Math.max(-1, minRelevance) : 0.48;
   const normalizedQuestion = normalizeText(question).trim();
@@ -193,7 +202,7 @@ async function hybridSearch(notebookId: string, question: string, queryVector: n
   const codes = intent.codes;
   const temporalTerms = [...new Set(intent.temporal)];
   const pool = Math.max(30, topK * 6, rerankN ? rerankCandidates() : 0);
-  const found = await searchCandidates(notebookId, queryVector, queryStems, codes, pool);
+  const found = await searchCandidates(notebookId, queryVector, normalizedQuestion, codes, pool, 256, opts.scope);
   const pointIds = [...new Set([...found.dense, ...found.sparse, ...found.code].map(p => String(p.id)))];
   const byPoint = loadCandidates(pointIds);
   const ids = pointIds.filter(id => byPoint.has(id)), rows = ids.map(id => byPoint.get(id)!), n = rows.length, at = new Map(ids.map((id, i) => [id, i]));
@@ -202,9 +211,10 @@ async function hybridSearch(notebookId: string, question: string, queryVector: n
   for (const p of [...found.dense, ...found.code]) semOf.set(String(p.id), p.score);
   const missing = ids.filter(id => !semOf.has(id));
   for (const [id, s] of await denseScores(notebookId, queryVector, missing)) semOf.set(id, s);
-  const sem = new Float32Array(n), cov = new Float32Array(n), codeHit = new Float32Array(n), temporal = new Float32Array(n), lexical = new Uint8Array(n);
+  const sem = new Float32Array(n), cov = new Float32Array(n), codeHit = new Float32Array(n), temporal = new Float32Array(n), lexical = new Uint8Array(n), noDense = new Uint8Array(n);
   rows.forEach((row, r) => {
     sem[r] = semOf.get(ids[r]) ?? -1;
+    noDense[r] = row.dense ? 0 : 1;
     const stems = new Set(stemTokens(row.text));
     const matched = queryStems.filter(t => stems.has(t)).length;
     lexical[r] = matched > 0 ? 1 : 0;
@@ -225,11 +235,13 @@ async function hybridSearch(notebookId: string, question: string, queryVector: n
   const sample = found.sample, total = sample.length;
   const mean = sample.reduce((s, x) => s + x, 0) / Math.max(1, total);
   const std = Math.sqrt(sample.reduce((s, x) => s + (x - mean) ** 2, 0) / Math.max(1, total)) || 1;
+  // Trecho ainda sem vetor denso (documento recém-chegado): similaridade neutra (a média do notebook) e o portão vira só lexical.
+  for (let i = 0; i < n; i++) if (noDense[i]) sem[i] = total ? mean : threshold;
   const zOf = (i: number) => (sem[i] - mean) / std;
   const all = rows.map((_, i) => i);
   const supported = relaxed
-    ? (i: number) => codeHit[i] > 0 || sem[i] >= threshold - 0.08 || (lexical[i] > 0 && cov[i] >= 0.34)
-    : (i: number) => codeHit[i] > 0 || (sem[i] >= threshold && (cov[i] >= 0.34 || (n >= 6 ? zOf(i) >= 1.3 : sem[i] >= 0.65)));
+    ? (i: number) => codeHit[i] > 0 || (noDense[i] ? cov[i] >= 0.34 : sem[i] >= threshold - 0.08 || (lexical[i] > 0 && cov[i] >= 0.34))
+    : (i: number) => codeHit[i] > 0 || (noDense[i] ? cov[i] >= 0.5 : sem[i] >= threshold && (cov[i] >= 0.34 || (n >= 6 ? zOf(i) >= 1.3 : sem[i] >= 0.65)));
   const combined = (i: number) => sem[i] + cov[i] * 0.2 + codeHit[i] * 0.25 + temporal[i] * 0.06 + (normalizedQuestion.length >= 8 && rows[i].text.includes(normalizedQuestion) ? 0.08 : 0);
   // Definição: introdução (2 primeiros trechos) do documento que cita o termo sobe no ranking (~meia posição de RRF).
   const definition = definitionIntent.test(normalizedQuestion);
@@ -557,7 +569,9 @@ async function asksDocuments(message: string): Promise<boolean> {
   }
 }
 
-export async function ask(notebookId: string, question: string, options: AskOptions = {}) {
+// A indexação semântica em segundo plano pausa enquanto há pergunta em andamento (o Ollama atende a pergunta primeiro).
+export const ask = (notebookId: string, question: string, options: AskOptions = {}) => withQuestion(() => askNow(notebookId, question, options));
+async function askNow(notebookId: string, question: string, options: AskOptions = {}) {
   // Até 8 mensagens para resolver referências; o prompt usa uma janela menor (trimHistory).
   const history = (options.history || []).slice(-8);
   const t0 = Date.now();
@@ -593,10 +607,12 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   if (followUp.mode !== "none") console.info(`[RAG] acompanhamento (${followUp.mode}${followUp.mode === "model" && retrievalQuestion === followUp.query ? ", plano B" : ""}): ${retrievalQuestion.slice(0, 160)}`);
   const normalizedQuestion = normalizeText(retrievalQuestion).trim();
   const intent = analyzeQuery(intentText);
+  // Escopo: só documentos deste notebook (ids desconhecidos são ignorados; nenhum válido = o notebook inteiro).
+  const scope = options.documentIds?.length ? (db.prepare(`SELECT id FROM documents WHERE notebook_id=? AND id IN (${options.documentIds.map(() => "?").join(",")})`).all(notebookId, ...options.documentIds) as { id: string }[]).map(d => d.id) : [];
 
   // Filtros, contagens, somas, médias, ordenações e listagens completas sobre tabelas são resolvidos por código,
   // com todos os registros da tabela: exato, rastreável e sem gastar geração do LLM.
-  const structured = process.env.STRUCTURED_QUERIES === "false" ? null : structuredQuery(notebookId, intentText, intent);
+  const structured = process.env.STRUCTURED_QUERIES === "false" ? null : structuredQuery(notebookId, intentText, intent, scope);
   if (structured?.kind === "direct") {
     options.onSources?.(structured.sources, { found: structured.sources.length, used: structured.sources.length, reranked: false });
     options.onToken?.(structured.answer);
@@ -617,7 +633,8 @@ export async function ask(notebookId: string, question: string, options: AskOpti
   const rerankN = rerankEnabled() ? rerankTopN(mini ? 4 : rerankCandidates()) : 0;
   let rerankInfo: { ms: number; candidates: number; best: number } | undefined;
   if (summaryIntent.test(normalizedQuestion) && topicTerms.length <= 1 && (chunkCount.n || savedCount.n)) {
-    scored = summarySample(notebookId, Math.min(10, topK + 2));
+    // Resumos guardados por documento (One page / Resumir) cobrem cada documento inteiro; sem eles, amostra de trechos.
+    scored = summaryItems(notebookId, scope) ?? summarySample(notebookId, Math.min(10, topK + 2), scope);
     summaryMode = true;
     foundCount = scored.length;
   } else {
@@ -629,16 +646,16 @@ export async function ask(notebookId: string, question: string, options: AskOpti
     await indexSavedSafely(notebookId);
     const [queryVector] = await embedQueries([retrievalQuestion]);
     try {
-      let found = await hybridSearch(notebookId, retrievalQuestion, queryVector, effectiveTopK, intent, false, rerankN);
+      let found = await hybridSearch(notebookId, retrievalQuestion, queryVector, effectiveTopK, intent, false, rerankN, { scope });
       // Modelos pequenos às vezes reescrevem mal a pergunta de acompanhamento: sem resultado, tenta a pergunta original.
       if (!found.scored.length && retrievalQuestion !== question) {
-        found = await hybridSearch(notebookId, question, (await embedQueries([question]))[0], effectiveTopK, analyzeQuery(question), false, rerankN);
+        found = await hybridSearch(notebookId, question, (await embedQueries([question]))[0], effectiveTopK, analyzeQuery(question), false, rerankN, { scope });
         if (found.scored.length) console.info("[RAG] reescrita sem resultado; usada a pergunta original");
       }
       // Ainda vazio: busca relaxada com poucos trechos. O modelo recebe o contexto e decide se responde ou recusa.
       // No modo conversa não: trecho só "parecido" com "estou cansado hoje" ou "me conta uma piada" é ruído.
       if (!found.scored.length && !route) {
-        found = await hybridSearch(notebookId, retrievalQuestion, queryVector, Math.min(3, effectiveTopK), intent, true, Math.min(3, rerankN));
+        found = await hybridSearch(notebookId, retrievalQuestion, queryVector, Math.min(3, effectiveTopK), intent, true, Math.min(3, rerankN), { scope });
         if (found.scored.length) console.info(`[RAG] busca relaxada: ${found.scored.length} trecho(s)`);
       }
       scored = found.scored;
@@ -735,6 +752,7 @@ ${conversational ? "Mensagem" : "Pergunta"}: ${conversational ? question : retri
   const recordSources = structured?.kind === "records" ? structured.sources : [];
   options.onSources?.([...recordSources, ...includedItems.map(toSource)], { found: recordSources.length + foundCount, used: recordSources.length + includedItems.length, reranked: !!rerankInfo });
   const t1 = Date.now();
+  if (options.retrievalOnly) return { answer: "", sources: [...recordSources, ...includedItems.map(toSource)] };
   // Contexto ranqueado do mais relevante para o menos relevante: registros exatos por código primeiro, depois as passagens na
   // ordem do reranking (CONTEXT_ORDER=relevance_last inverte). O prompt de sistema avisa a ordem ao modelo (orderRule).
   const hint = temporalHint(retrievalQuestion, passages.slice(0, 3).map(p => p.text)).slice(0, HINT_RESERVE_CHARS);

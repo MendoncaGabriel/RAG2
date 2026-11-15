@@ -1,4 +1,6 @@
 import fs from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import crypto from "node:crypto";
 import path from "node:path";
 import { createRequire } from "node:module";
 import pdf from "pdf-parse";
@@ -7,6 +9,7 @@ import * as XLSX from "xlsx";
 import yauzl from "yauzl";
 import { createWorker, PSM } from "tesseract.js";
 import sharp from "sharp";
+import { config } from "./config.js";
 import { dataDir, db, transaction } from "./database.js";
 import { normalizeText } from "./sparse.js";
 import { chunkStructured, cleanPdfPages, isTocChunk, stripPageMarkers } from "./chunking.js";
@@ -21,6 +24,56 @@ export function fixMojibake(value: string): string {
   } catch {
     return value;
   }
+}
+
+// Extensões aceitas (as mesmas de extractText): a importação de pastas ignora o resto.
+export const SUPPORTED_EXTENSIONS = new Set([".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".csv", ".txt", ".md", ".markdown", ".json", ".jsonl", ".js", ".jsx", ".ts", ".tsx", ".py", ".java", ".c", ".cpp", ".h", ".css", ".html", ".htm", ".xml", ".yaml", ".yml", ".toml", ".sql", ".sh", ".bat", ".log", ".ini", ".config", ".rst", ".tex", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"]);
+
+// SHA-256 do arquivo em streaming (não carrega o arquivo na memória).
+export function fileHash(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const h = crypto.createHash("sha256");
+    createReadStream(filePath).on("error", reject).on("data", d => h.update(d)).on("end", () => resolve(h.digest("hex")));
+  });
+}
+// Documento do notebook com o mesmo conteúdo (envio repetido): devolve o nome dele.
+export const duplicateOf = (notebookId: string, hash: string) =>
+  (db.prepare("SELECT name FROM documents WHERE notebook_id=? AND content_hash=? LIMIT 1").get(notebookId, hash) as { name: string } | undefined)?.name ?? null;
+
+// Importação de uma pasta do servidor (IMPORT_PATH, montada só leitura no container): varre a subpasta pedida, ignora formatos
+// não suportados, arquivos acima de MAX_FILE_SIZE_MB e conteúdo já presente no notebook (hash), e enfileira os demais.
+// Os arquivos são lidos onde estão (external=1): não são copiados para o volume e excluir o documento não apaga o original.
+export type ImportResult = { added: number; duplicates: number; skipped: { file: string; reason: string }[]; folder: string };
+const importRoot = () => path.resolve(config.importPath);
+export async function importFolders(): Promise<string[]> {
+  try { return (await fs.readdir(importRoot(), { withFileTypes: true })).filter(e => e.isDirectory() && !e.name.startsWith(".")).map(e => e.name).sort(); } catch { return []; }
+}
+export async function importFolder(notebookId: string, folder = ""): Promise<ImportResult> {
+  const root = importRoot(), dir = path.resolve(root, folder.replace(/^[/\\]+/, ""));
+  if (dir !== root && !dir.startsWith(root + path.sep)) throw new Error("A pasta precisa estar dentro da pasta de importação.");
+  try { if (!(await fs.stat(dir)).isDirectory()) throw new Error(); } catch { throw new Error(`Pasta não encontrada na pasta de importação do servidor: "${folder || "/"}".`); }
+  const maxBytes = Number(process.env.MAX_FILE_SIZE_MB || 100) * 1048576;
+  const result: ImportResult = { added: 0, duplicates: 0, skipped: [], folder: path.relative(root, dir) || "/" };
+  const seen = new Set<string>();
+  const walk = async (current: string): Promise<void> => {
+    for (const entry of (await fs.readdir(current, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name.startsWith(".")) continue;
+      const full = path.join(current, entry.name), rel = path.relative(root, full);
+      if (entry.isDirectory()) { await walk(full); continue; }
+      if (!entry.isFile()) continue;
+      if (!SUPPORTED_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) { result.skipped.push({ file: rel, reason: "formato não suportado" }); continue; }
+      if ((await fs.stat(full)).size > maxBytes) { result.skipped.push({ file: rel, reason: `maior que ${maxBytes / 1048576} MB` }); continue; }
+      const hash = await fileHash(full);
+      if (seen.has(hash) || duplicateOf(notebookId, hash)) { result.duplicates++; continue; }
+      seen.add(hash);
+      const id = crypto.randomUUID(), name = fixMojibake(entry.name);
+      db.prepare("INSERT INTO documents(id,notebook_id,name,type,path,content_hash,external) VALUES(?,?,?,?,?,?,1)").run(id, notebookId, name, path.extname(name).toLowerCase().slice(1), full, hash);
+      result.added++;
+      processDocument(id, notebookId, full, name).catch(e => console.error(`Importação (${rel}):`, e instanceof Error ? e.message : e));
+    }
+  };
+  await walk(dir);
+  return result;
 }
 
 export async function extractText(filePath: string, name: string, onProgress?: (progress: number) => void): Promise<string> {
@@ -188,10 +241,11 @@ export function reindexDocument(id: string): Promise<boolean> {
 // Exclusão consistente: SQLite primeiro (a busca ignora pontos sem linha no SQLite), depois arquivo e pontos do Qdrant
 // (se o Qdrant estiver fora, a exclusão fica pendente e a reconciliação conclui).
 export async function removeDocument(id: string) {
-  const doc = db.prepare("SELECT path FROM documents WHERE id=?").get(id) as { path: string | null } | undefined;
+  const doc = db.prepare("SELECT path,external FROM documents WHERE id=?").get(id) as { path: string | null; external: number } | undefined;
   if (!doc) return false;
   db.prepare("DELETE FROM documents WHERE id=?").run(id);
-  if (doc.path) { try { await fs.unlink(doc.path); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error("Falha removendo arquivo:", e); } }
+  // Arquivo importado de pasta do servidor: o original é do usuário e fica onde está.
+  if (doc.path && !doc.external) { try { await fs.unlink(doc.path); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") console.error("Falha removendo arquivo:", e); } }
   await deleteDocumentVectors(id);
   return true;
 }

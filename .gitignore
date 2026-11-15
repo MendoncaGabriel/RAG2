@@ -13,6 +13,10 @@ volumes/
 *.db-wal
 *.db-shm
 
+# Pasta de importação em lote (arquivos do usuário)
+import/*
+!import/.gitkeep
+
 # Segredos e configuração local
 .env
 .env.*

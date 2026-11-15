@@ -224,8 +224,9 @@ function bestColumn(t: Table, text: string, pool: string[], exclude?: string): {
   return { col, overlap };
 }
 
-export function structuredQuery(notebookId: string, question: string, intent = analyzeQuery(question)): Structured | null {
-  const tables = loadTables(notebookId);
+export function structuredQuery(notebookId: string, question: string, intent = analyzeQuery(question), scope?: string[] | null): Structured | null {
+  // Escopo escolhido pelo usuário: só as tabelas desses documentos (a chave da tabela começa pelo id do documento).
+  const tables = loadTables(notebookId).filter(t => !scope?.length || scope.includes(t.key.split("|")[0]));
   if (!tables.length) return null;
   const q = norm(question);
   const codeSet = new Set(intent.codes);
