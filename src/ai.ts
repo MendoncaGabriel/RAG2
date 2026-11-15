@@ -1,16 +1,16 @@
 import crypto from "node:crypto";
-import { config } from "./config.js";
+import fs from "node:fs";
 import { db } from "./database.js";
 import { networkCause } from "./qdrant.js";
 import { deriveProfile, embeddingPrefix, isReasoningOnly, sizeFromDetails, type ModelInfo } from "./modelprofile.js";
 import { tunedThreads } from "./tuning.js";
 
-// Camada única de IA: servidores Ollama cadastrados pelo usuário (tela de Configurações) e dois "slots" ativos,
+// Camada única de IA: servidores Ollama cadastrados pelo usuário (tela de Configurações, ou detecção automática) e dois "slots" ativos,
 // um para chat e outro para embeddings. Nada aqui depende de variáveis de ambiente.
 export type ProviderKind = "ollama";
-export const providerKinds: Record<ProviderKind, { label: string; baseUrl: string }> = {
-  // No container, localhost é o próprio container: provedor novo nasce com o OLLAMA_BASE_URL (IP do Windows visto pelo WSL2).
-  ollama: { label: "Ollama", get baseUrl() { return config.ollama.baseUrl || "http://localhost:11434"; } },
+const providerKinds: Record<ProviderKind, { label: string; baseUrl: string }> = {
+  // No container, localhost é o próprio container: o botão "Detectar" de Configurações procura o endereço certo (detectOllama).
+  ollama: { label: "Ollama", baseUrl: "http://localhost:11434" },
 };
 
 export interface Provider { id: string; name: string; kind: ProviderKind; baseUrl: string; apiKey: string; chatModel: string; embeddingModel: string }
@@ -28,7 +28,7 @@ const getSetting = (key: string) => (db.prepare("SELECT value FROM settings WHER
 const setSetting = (key: string, value: string) => { db.prepare("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value); };
 
 // A chave nunca sai do servidor: o cliente só recebe se existe e os últimos caracteres.
-const toPublic = (p: Provider) => ({ id: p.id, name: p.name, kind: p.kind, kindLabel: providerKinds[p.kind].label, baseUrl: p.baseUrl, chatModel: p.chatModel, embeddingModel: p.embeddingModel, hasKey: !!p.apiKey, keyHint: p.apiKey ? `••••${p.apiKey.slice(-4)}` : "" });
+const toPublic = (p: Provider) => ({ id: p.id, name: p.name, baseUrl: p.baseUrl, chatModel: p.chatModel, embeddingModel: p.embeddingModel, hasKey: !!p.apiKey, keyHint: p.apiKey ? `••••${p.apiKey.slice(-4)}` : "" });
 export function listProviders() {
   const rows = db.prepare("SELECT * FROM ai_providers ORDER BY created_at, name").all().map(fromRow);
   return { providers: rows.map(toPublic), active: { chat: getProvider(getSetting("active_chat"))?.id || null, embedding: getProvider(getSetting("active_embedding"))?.id || null } };
@@ -36,14 +36,14 @@ export function listProviders() {
 
 const clean = (value: unknown, max: number) => (typeof value === "string" ? value.trim().slice(0, max) : "");
 function normalize(input: any, current?: Provider): Omit<Provider, "id"> {
-  const kind = (input?.kind ?? current?.kind) as ProviderKind;
-  if (!providerKinds[kind]) throw new Error("Tipo de provedor inválido.");
-  const name = clean(input?.name, 80);
-  if (!name) throw new Error("Nome obrigatório (até 80 caracteres).");
-  const baseUrl = (clean(input?.baseUrl, 300) || providerKinds[kind].baseUrl).replace(/\/+$/, "");
-  if (!/^https?:\/\/\S+$/.test(baseUrl)) throw new Error("A URL base deve começar com http:// ou https://.");
+  // O sistema só usa Ollama: o tipo não é escolhido pelo usuário.
+  const kind: ProviderKind = "ollama";
+  const baseUrl = (clean(input?.baseUrl, 300) || current?.baseUrl || providerKinds[kind].baseUrl).replace(/\/+$/, "");
+  if (!/^https?:\/\/\S+$/.test(baseUrl)) throw new Error("O endereço do servidor deve começar com http:// ou https:// (ex.: http://172.29.48.1:11434).");
+  // Nome opcional na tela: sem ele, usa o endereço do servidor.
+  const name = clean(input?.name, 80) || current?.name || ("Ollama (" + new URL(baseUrl).host + ")");
   // Chave em branco na edição mantém a atual; para remover use clearKey.
-  const apiKey = input?.clearKey ? "" : clean(input?.apiKey, 500) || (current && current.kind === kind ? current.apiKey : "");
+  const apiKey = input?.clearKey ? "" : clean(input?.apiKey, 500) || (current?.apiKey || "");
   const chatModel = clean(input?.chatModel, 200), embeddingModel = clean(input?.embeddingModel, 200);
   if (!chatModel && !embeddingModel) throw new Error("Informe ao menos um modelo (chat ou embeddings).");
   return { name, kind, baseUrl, apiKey, chatModel, embeddingModel };
@@ -90,18 +90,62 @@ export function activeSummary() {
   return { chat: one("chat"), embedding: one("embedding") };
 }
 
-// O Ollama do ambiente (OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_EMBEDDING_MODEL: o Ollama do Windows 11) é sincronizado a cada
-// inicialização num provedor fixo e ocupa os slots que estiverem vazios. Outros servidores podem ser cadastrados em Configurações.
-export const ENV_PROVIDER_ID = "env-ollama";
-{
-  const o = config.ollama;
-  if (o.baseUrl && (o.llmModel || o.embeddingModel)) {
-    const data = normalize({ name: "Ollama (Windows)", kind: "ollama", baseUrl: o.baseUrl, apiKey: o.apiKey, clearKey: !o.apiKey, chatModel: o.llmModel, embeddingModel: o.embeddingModel });
-    db.prepare("INSERT INTO ai_providers(id,name,kind,base_url,api_key,chat_model,embedding_model) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,base_url=excluded.base_url,api_key=excluded.api_key,chat_model=excluded.chat_model,embedding_model=excluded.embedding_model")
-      .run(ENV_PROVIDER_ID, data.name, data.kind, data.baseUrl, data.apiKey, data.chatModel, data.embeddingModel);
-    if (!activeProvider("chat") && data.chatModel) setActive({ chat: ENV_PROVIDER_ID });
-    if (!activeProvider("embedding") && data.embeddingModel) setActive({ embedding: ENV_PROVIDER_ID });
+// ---------- Detecção automática do servidor ----------
+// Dentro do container, localhost é o próprio container: o Ollama do Windows aparece pelo IP do Windows visto pelo WSL2 (DNS repassado
+// pelo WSL e gateway), pela ponte de scripts/windows/ollama-wsl-bridge.ps1. Só endereços locais são testados, nunca um destino informado.
+const readText = (file: string) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
+export function candidateUrls(): string[] {
+  const hosts = new Set<string>(["localhost", "host.docker.internal"]);
+  for (const m of readText("/etc/resolv.conf").matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)) hosts.add(m[1]);
+  for (const line of readText("/proc/net/route").split("\n").slice(1)) {
+    const c = line.trim().split(/\s+/);
+    if (c[1] === "00000000" && c[2]) { const n = parseInt(c[2], 16); hosts.add([n & 255, (n >> 8) & 255, (n >> 16) & 255, (n >>> 24) & 255].join(".")); }
   }
+  return [...hosts].filter(h => !/^127\.|^0\./.test(h)).map(h => `http://${h}:11434`);
+}
+// O Windows (host do WSL2 em modo NAT) é o gateway .1 da sub-rede /20 do WSL, sempre dentro de 172.16.0.0/12. De dentro do container esse IP
+// não aparece em arquivo nenhum (o resolv.conf traz só o DNS do WSL e o gateway é a rede do Docker), então, se nada responder nos endereços
+// conhecidos, a detecção testa os 256 gateways possíveis, só na porta do Ollama e só quando o usuário pede a detecção.
+export function wslGatewayCandidates(): string[] {
+  const urls: string[] = [];
+  for (let b = 16; b <= 31; b++) for (let c = 0; c < 256; c += 16) urls.push(`http://172.${b}.${c}.1:11434`);
+  return urls;
+}
+async function probe(baseUrl: string, timeout: number): Promise<{ baseUrl: string; models: string[] } | null> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`, { signal: AbortSignal.timeout(timeout) });
+    if (!res.ok) return null;
+    const data = await res.json() as any;
+    return Array.isArray(data?.models) ? { baseUrl, models: data.models.map((m: any) => String(m.name)).sort() } : null;
+  } catch { return null; }
+}
+export async function detectOllama(): Promise<{ baseUrl: string; models: string[] }[]> {
+  const known = [...new Set(candidateUrls())];
+  const hit = (await Promise.all(known.map(u => probe(u, 2_500)))).filter((f): f is { baseUrl: string; models: string[] } => !!f);
+  if (hit.length) return hit;
+  return (await Promise.all(wslGatewayCandidates().filter(u => !known.includes(u)).map(u => probe(u, 1_500)))).filter((f): f is { baseUrl: string; models: string[] } => !!f);
+}
+const isEmbeddingName = (n: string) => /embed|bge|e5-|minilm|gte-|arctic|mxbai|nomic|jina|bert/i.test(n);
+const rank = (n: string, prefs: RegExp[]) => { const i = prefs.findIndex(r => r.test(n)); return i < 0 ? prefs.length : i; };
+// Escolha padrão entre os modelos instalados: o que responde (família conhecida primeiro) e o de embeddings (bge-m3 primeiro).
+export function pickModels(models: string[]) {
+  const by = (list: string[], prefs: RegExp[]) => [...list].sort((x, y) => rank(x, prefs) - rank(y, prefs) || x.localeCompare(y))[0] || "";
+  return { chat: by(models.filter(m => !isEmbeddingName(m)), [/qwen3\.5/i, /qwen3/i, /qwen2\.5/i, /llama3/i, /gemma/i, /phi/i, /mistral/i]), embedding: by(models.filter(isEmbeddingName), [/bge-m3/i, /nomic/i, /mxbai/i, /embeddinggemma/i]) };
+}
+// Um clique: acha o Ollama, escolhe modelos instalados, cadastra e põe em uso o que ainda estiver sem escolha (não troca o que o usuário já usa).
+export async function autoConfigure() {
+  const found = await detectOllama();
+  if (!found.length) throw new Error(`Nenhum Ollama encontrado automaticamente (testei este computador, o DNS e o gateway do WSL2 e os gateways 172.16–31.x). ${bridgeHint} Se o servidor estiver em outro endereço, cadastre-o manualmente.`);
+  const server = found.find(f => f.models.length) ?? found[0], picked = pickModels(server.models);
+  if (!picked.chat && !picked.embedding) throw new Error(`O Ollama em ${server.baseUrl} não tem modelos instalados. No Windows, execute "ollama pull qwen3:1.7b" e "ollama pull bge-m3", ou cadastre outro modelo manualmente.`);
+  const existing = listProviders().providers.find(p => p.baseUrl === server.baseUrl);
+  const saved = existing
+    ? updateProvider(existing.id, { name: existing.name, baseUrl: existing.baseUrl, chatModel: existing.chatModel || picked.chat, embeddingModel: existing.embeddingModel || picked.embedding })!
+    : createProvider({ name: "Ollama (detectado)", baseUrl: server.baseUrl, chatModel: picked.chat, embeddingModel: picked.embedding });
+  const activated: Slot[] = [];
+  if (!activeProvider("chat") && saved.chatModel) { setActive({ chat: saved.id }); activated.push("chat"); }
+  if (!activeProvider("embedding") && saved.embeddingModel) { setActive({ embedding: saved.id }); activated.push("embedding"); }
+  return { provider: saved, baseUrl: server.baseUrl, chatModel: saved.chatModel, embeddingModel: saved.embeddingModel, activated, models: server.models.length };
 }
 
 // ---------- HTTP ----------
@@ -134,7 +178,7 @@ export async function ensureModel(p: Provider, model: string) {
   if ((await installedModels(p, true)).has(withTag(model))) return;
   throw new Error(`O modelo "${model}" não está disponível no Ollama em ${p.baseUrl}. No Windows, execute "ollama pull ${model}" ou escolha outro modelo.`);
 }
-// Estado do Ollama do ambiente e dos modelos configurados (health check e inicialização).
+// Estado do Ollama em uso e dos modelos escolhidos (health check e inicialização).
 export async function ollamaStatus(): Promise<{ ok: boolean; baseUrl?: string; models?: string[]; error?: string }> {
   const p = activeProvider("chat") ?? activeProvider("embedding");
   if (!p) return { ok: false, error: "Nenhum servidor Ollama configurado." };
@@ -194,7 +238,7 @@ export async function refreshModelInfo(p: Provider | null): Promise<ModelInfo | 
   return info ?? undefined;
 }
 
-// Threads do Ollama: medidas para este PC na inicialização (tuning.ts) ou OLLAMA_NUM_THREAD; sem valor, o Ollama decide.
+// Threads do Ollama: conforme Configurações: medidas para este PC (tuning.ts), valor manual ou o Ollama decide.
 // O mesmo valor em todas as chamadas: trocar num_thread entre chamadas faz o Ollama recarregar o modelo.
 const threadOption = (p: Provider) => { const n = tunedThreads(p.baseUrl); return n ? { num_thread: n } : {}; };
 
@@ -247,11 +291,20 @@ export async function embedMany(inputs: string[], kind: "query" | "document" = "
 }
 
 // ---------- Descoberta de modelos e teste ----------
-export async function listModels(input: { kind: ProviderKind; baseUrl?: string; apiKey?: string }): Promise<string[]> {
-  if (!providerKinds[input.kind]) throw new Error("Tipo de provedor inválido.");
-  const base = (input.baseUrl || providerKinds[input.kind].baseUrl).replace(/\/+$/, ""), key = input.apiKey || "", label = providerKinds[input.kind].label;
-  const data = await jsonOrThrow(label, await http(label, `${base}/api/tags`, { headers: key ? { authorization: `Bearer ${key}` } : {}, timeout: 15_000 }));
-  return ((data.models || []) as any[]).map(m => String(m.name)).sort();
+// Modelos instalados no servidor informado (com a chave informada). Sem endereço, procura o Ollama sozinho (detectOllama). Devolve também
+// a divisão entre modelos de chat e de embeddings e a sugestão padrão, para a tela oferecer a escolha certa em cada cadastro.
+export async function listModels(input: { baseUrl?: string; apiKey?: string }) {
+  let base = (input.baseUrl || "").trim().replace(/\/+$/, ""), models: string[];
+  if (!base) {
+    const found = (await detectOllama())[0];
+    if (!found) throw new Error("Nenhum Ollama encontrado automaticamente. Digite o endereço do servidor. " + bridgeHint);
+    base = found.baseUrl; models = found.models;
+  } else {
+    if (!/^https?:\/\/\S+$/.test(base)) throw new Error("O endereço do servidor deve começar com http:// ou https://.");
+    const data = await jsonOrThrow("Ollama", await http("Ollama", base + "/api/tags", { headers: input.apiKey ? { authorization: "Bearer " + input.apiKey } : {}, timeout: 15_000 }));
+    models = ((data.models || []) as any[]).map(m => String(m.name)).sort();
+  }
+  return { baseUrl: base, models, chat: models.filter(m => !isEmbeddingName(m)), embedding: models.filter(isEmbeddingName), suggested: pickModels(models) };
 }
 // Faz uma chamada real e mínima para cada modelo cadastrado.
 export async function testProvider(p: Provider) {

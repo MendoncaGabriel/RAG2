@@ -47,7 +47,7 @@ let ensuring: Promise<{ model: string; dims: number; created: boolean }> | null 
 // vetores de outro modelo) só quando allowRecreate (processar/reindexar documentos), nunca numa pergunta.
 export async function ensureCollection(allowRecreate = false): Promise<{ model: string; dims: number; created: boolean }> {
   const model = activeEmbeddingModel();
-  if (!model) throw new Error("Nenhuma IA de embeddings selecionada. Defina OLLAMA_EMBEDDING_MODEL ou escolha uma em Configurações.");
+  if (!model) throw new Error("Nenhuma IA de embeddings selecionada. Escolha uma em Configurações.");
   const collection = config.qdrant.collection;
   if (ensured && ensured.model === model && ensured.collection === collection) return { ...ensured, created: false };
   while (ensuring) await ensuring.catch(() => {});
@@ -218,6 +218,8 @@ const denseWaiters: (() => void)[] = [];
 // Perguntas em andamento: o worker espera entre lotes para o embedding da pergunta não disputar o Ollama com a indexação.
 let asking = 0;
 export async function withQuestion<T>(run: () => Promise<T>): Promise<T> { asking++; try { return await run(); } finally { asking--; } }
+// Tarefas longas de LLM (One page) esperam as perguntas em andamento terminarem para não atrasar o chat.
+export const questionInProgress = () => asking > 0;
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 export const densePending = () => (db.prepare("SELECT count(*) AS n FROM chunks WHERE indexed=2").get() as { n: number }).n;
 export const denseStatus = () => ({ running: !!denseLoop, pending: densePending(), error: denseError || undefined });

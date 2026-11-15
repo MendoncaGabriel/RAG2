@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import { db } from "./database.js";
 import { activeProvider, cachedModelInfo, chat, embedMany, refreshModelInfo } from "./ai.js";
 import { deriveProfile, isCompact } from "./modelprofile.js";
+import { getAiTuning } from "./aisettings.js";
+import { tunedThreads, tuningSummary } from "./tuning.js";
 import { analyzeQuery, extractCodes, structuredQuery, type QueryIntent, type Source } from "./structured.js";
 import { normalizeText, stemTokens, stopWords } from "./sparse.js";
 import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel, withQuestion } from "./indexing.js";
@@ -301,7 +303,21 @@ function buildPassages(selected: any[], expandTop: number) {
 
 // Perfil de uso derivado do modelo de chat ativo (src/modelprofile.ts): tamanho, família, contexto nativo e capacidades vêm do Ollama
 // (/api/show, em cache) ou, na falta, do nome. Define amostragem, tokens e num_ctx da geração e o top-K, o contexto e os vizinhos da recuperação.
-const modelProfile = (p: ReturnType<typeof activeProvider>) => deriveProfile(p?.chatModel ?? "", cachedModelInfo(p));
+// Ajustes manuais de Configurações (aisettings.ts) vencem o perfil; 0 = automático. O contexto manual ainda é limitado ao nativo do modelo.
+const modelProfile = (p: ReturnType<typeof activeProvider>) => {
+  const t = getAiTuning(), base = deriveProfile(p?.chatModel ?? "", cachedModelInfo(p), t.contextTokens);
+  return { ...base, ...(t.maxTokens ? { maxTokens: t.maxTokens } : {}), ...(t.contextChars ? { contextChars: t.contextChars } : {}), ...(t.topK ? { topK: t.topK } : {}) };
+};
+// Para a tela de Configurações: o que o modo automático escolheria para o modelo ativo e o que está valendo agora.
+export async function tuningOverview() {
+  const p = activeProvider("chat");
+  await prepareModel();
+  const info = cachedModelInfo(p), auto = deriveProfile(p?.chatModel ?? "", info), now = modelProfile(p), pick = (x: typeof auto) => ({ contextTokens: x.contextTokens, maxTokens: x.maxTokens, contextChars: x.contextChars, topK: x.topK });
+  const measured = tuningSummary();
+  return { model: p?.chatModel || null, tier: auto.tier, family: auto.family, sizeB: Number(auto.sizeB.toFixed(1)), nativeContext: info?.contextLength || null,
+    auto: pick(auto), effective: pick(now),
+    threads: { measured: measured && p && measured.baseUrl === p.baseUrl ? { value: measured.numThread ?? null, device: measured.device } : null, effective: p ? tunedThreads(p.baseUrl) ?? null : null } };
+}
 // Busca (e guarda em cache) os metadados do modelo ativo; chamar antes de usar o perfil para que num_ctx fique estável entre as chamadas.
 export const prepareModel = () => refreshModelInfo(activeProvider("chat"));
 
@@ -592,7 +608,7 @@ async function askNow(notebookId: string, question: string, options: AskOptions 
   }
   await prepareModel();
   const profile = modelProfile(activeProvider("chat"));
-  const topK = Math.min(12, Math.max(1, Number(process.env.RETRIEVAL_TOP_K) || profile.topK));
+  const topK = Math.min(12, Math.max(1, profile.topK));
   const compact = isCompact(profile.tier);
   // A busca ignora as trocas de conversa direta ("oi, tudo bem?" não vira assunto). "Sim"/"pode" depois de a IA oferecer
   // aprofundar busca o assunto anterior como um pedido de explicação.
@@ -702,7 +718,7 @@ async function askNow(notebookId: string, question: string, options: AskOptions 
       ? "Prefira uma resposta curta e direta, mas inclua o necessário para responder bem."
       : "Prefira uma resposta direta e objetiva, cobrindo todas as partes da pergunta; detalhe mais se a pergunta pedir. Use uma lista curta quando houver vários itens.";
   // Conversa: no Rápido, folga de saída um pouco maior que a da consulta (as frases de conversa são mais longas), sem chegar à do Detalhado.
-  const maxTokens = Math.max(128, Math.round((Number(process.env.CHAT_MAX_TOKENS) || profile.maxTokens) * (detailed ? 2 : conversational ? 0.75 : 0.5)));
+  const maxTokens = Math.max(128, Math.round(profile.maxTokens * (detailed ? 2 : conversational ? 0.75 : 0.5)));
   const userContent = (context: string, hint: string) => `<contexto>
 ${context || "(nenhum trecho dos documentos trata disso)"}
 </contexto>
@@ -715,7 +731,7 @@ ${conversational ? "Mensagem" : "Pergunta"}: ${conversational ? question : retri
   const fixedTokens = promptTokens([systemPrompt, ...turns.map(m => m.content), userContent("", "")]) + Math.ceil(HINT_RESERVE_CHARS / CHARS_PER_TOKEN);
   const budgetChars = Math.max(0, (profile.contextTokens - outputTokens - fixedTokens - CONTEXT_SAFETY_TOKENS) * CHARS_PER_TOKEN);
   // Dentro do orçamento, o tamanho que o modelo aproveita bem (perfil: 8000 caracteres no Qwen3.5-2B; listas ganham 30%).
-  const preferredChars = Math.round(Math.max(2_000, Number(process.env.MAX_CONTEXT_CHARS) || profile.contextChars) * (broad ? 1.3 : 1));
+  const preferredChars = Math.round(Math.max(2_000, profile.contextChars) * (broad ? 1.3 : 1));
   const contextLimit = Math.min(preferredChars, budgetChars);
   const recordBlock = structured?.kind === "records" ? `[Registros exatos dos códigos citados]\n${structured.block}` : "";
   // Vizinhos ("small-to-big") só com espaço sobrando: se os trechos relevantes não cabem com eles, saem primeiro os vizinhos,

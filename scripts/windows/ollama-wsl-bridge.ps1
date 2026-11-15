@@ -35,4 +35,4 @@ New-NetFirewallRule -DisplayName $ruleName -Description 'Permite que containers 
   -Direction Inbound -Protocol TCP -LocalAddress $ip -LocalPort $Port -RemoteAddress $subnet -Action Allow -Profile Any | Out-Null
 
 Write-Output "Ponte criada: $ip`:$Port (WSL2, sub-rede $subnet) -> 127.0.0.1:$Port"
-Write-Output "Use no .env:  OLLAMA_BASE_URL=http://$ip`:$Port"
+Write-Output "Na tela Configuracoes da aplicacao, use a URL:  http://$ip`:$Port  (ou clique em Detectar / Configurar automaticamente)"

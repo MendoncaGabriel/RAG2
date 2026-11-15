@@ -1,5 +1,5 @@
 // Testes de integração REAIS (sem mocks): Qdrant do docker compose (QDRANT_URL/QDRANT_API_KEY) e Ollama do Windows 11
-// (OLLAMA_BASE_URL, OLLAMA_LLM_MODEL, OLLAMA_EMBEDDING_MODEL). Executar: docker compose --profile test run --rm tests
+// (TEST_OLLAMA_URL, TEST_CHAT_MODEL, TEST_EMBEDDING_MODEL; sem URL, o Ollama é detectado). Executar: docker compose --profile test run --rm tests
 // Usam uma collection temporária (it_*) e um SQLite temporário; nada dos dados da aplicação é tocado.
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
@@ -21,6 +21,12 @@ const idx = await import("../../src/indexing.js");
 const docs = await import("../../src/documents.js");
 const rag = await import("../../src/rag.js");
 const { config } = await import("../../src/config.js");
+// A IA vem das Configurações (SQLite): o teste cadastra o próprio provedor no banco temporário, como a tela faria.
+const ollamaUrl = process.env.TEST_OLLAMA_URL || (await ai.detectOllama())[0]?.baseUrl;
+if (!ollamaUrl) throw new Error("Ollama não encontrado: defina TEST_OLLAMA_URL (IP do Windows visto pelo WSL2).");
+const chatModel = process.env.TEST_CHAT_MODEL || "qwen3:1.7b", embeddingModel = process.env.TEST_EMBEDDING_MODEL || "bge-m3";
+const testAi = ai.createProvider({ name: "Ollama teste", kind: "ollama", baseUrl: ollamaUrl, chatModel, embeddingModel });
+ai.setActive({ chat: testAi.id, embedding: testAi.id });
 const { normalizeText } = await import("../../src/sparse.js");
 const corpus = fs.readFileSync(new URL("../fixtures/Base_RAG_Verdanis.md", import.meta.url), "utf8");
 
@@ -51,7 +57,7 @@ after(async () => {
 test("infraestrutura: Ollama do Windows com os modelos e Qdrant da rede interna", async () => {
   const o = await ai.ollamaStatus();
   assert.ok(o.ok, o.error);
-  assert.deepEqual(o.models, [config.ollama.llmModel, config.ollama.embeddingModel]);
+  assert.deepEqual(o.models, [chatModel, embeddingModel]);
   assert.ok(await qd.ready(), `Qdrant não respondeu em ${config.qdrant.url}`);
   assert.match(String(await qd.version()), /^1\.\d+\.\d+/);
 });
@@ -72,7 +78,7 @@ test("ingestão: texto e metadados no SQLite, vetores no Qdrant, IDs consistente
   const d = docRow(main)!;
   assert.equal(d.status, "processed", d.error ?? "");
   assert.equal(d.stage, "done");
-  assert.equal(d.embedding_model, config.ollama.embeddingModel);
+  assert.equal(d.embedding_model, embeddingModel);
   const chunks = db.prepare("SELECT id,chunk_index,indexed,search_text FROM chunks WHERE document_id=? ORDER BY chunk_index").all(main) as { id: string; chunk_index: number; indexed: number; search_text: string }[];
   assert.ok(chunks.length > 100);
   assert.ok(chunks.every(c => c.indexed === 1 && c.id === idx.chunkPointId(main, c.chunk_index) && c.search_text));
@@ -181,14 +187,14 @@ test("exclusão consistente: SQLite e Qdrant", async () => {
 });
 
 test("Ollama indisponível na indexação: documento pesquisável por BM25; a busca semântica retoma sem duplicar", async () => {
-  const bad = ai.createProvider({ name: "offline", kind: "ollama", baseUrl: "http://127.0.0.1:9", embeddingModel: config.ollama.embeddingModel });
+  const bad = ai.createProvider({ name: "offline", kind: "ollama", baseUrl: "http://127.0.0.1:9", embeddingModel });
   ai.setActive({ embedding: bad.id });
   addDoc("it-doc-fail", "falha.md");
   try {
     await docs.processDocument("it-doc-fail", nb, null, "falha.md", corpus.slice(20_000, 32_000));
     await idx.denseIdle();
     assert.match(String(idx.denseStatus().error), /não foi possível conectar/);
-  } finally { ai.setActive({ embedding: ai.ENV_PROVIDER_ID }); ai.deleteProvider(bad.id); }
+  } finally { ai.setActive({ embedding: testAi.id }); ai.deleteProvider(bad.id); }
   const d = docRow("it-doc-fail")!;
   assert.equal(d.status, "processed", "pesquisável por BM25 mesmo sem o Ollama");
   assert.equal(d.stage, "dense", "vetores densos pendentes");
@@ -289,7 +295,7 @@ test("modelo de embeddings diferente do índice: a pergunta pede reindexação s
   try {
     const r = await rag.ask(nb, "Qual porta TCP o gateway industrial usa para OPC UA?");
     assert.match(r.answer, /Reindexar/);
-  } finally { set(config.ollama.embeddingModel); }
+  } finally { set(embeddingModel); }
   assert.ok((await qd.count(byDoc(main))) > 0);
 });
 

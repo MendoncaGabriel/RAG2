@@ -1,4 +1,4 @@
-// Resumos por documento guardados (etapa "map" do map-reduce): gerados uma vez pelo One page ou pelo "Resumir" e reaproveitados
+// Resumos por documento guardados: gravados pelo One page (que lê cada documento inteiro) e reaproveitados
 // nas próximas gerações e nas perguntas de resumo do chat ("resuma o notebook"), que passam a cobrir cada documento inteiro em
 // vez de alguns trechos amostrados. O resumo vale enquanto o conteúdo do documento não muda (assinatura: nº e tamanho dos trechos).
 import { db } from "./database.js";

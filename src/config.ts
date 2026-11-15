@@ -2,7 +2,8 @@ import "dotenv/config";
 import fs from "node:fs";
 import path from "node:path";
 
-// Configuração central de infraestrutura (bancos, Ollama, caminhos). Os ajustes finos do RAG (CHUNK_SIZE, RETRIEVAL_TOP_K…)
+// Configuração central de infraestrutura (bancos, caminhos). A IA (servidor Ollama, modelos, contexto, threads) não vem daqui: é
+// cadastrada na tela de Configurações e guardada no SQLite (ai.ts, aisettings.ts). Os ajustes finos do RAG (CHUNK_SIZE, RETRIEVAL_TOP_K…)
 // continuam lidos onde são usados, para que testes e benchmark possam trocá-los por variável de ambiente.
 const str = (name: string, fallback = "") => (process.env[name] ?? "").trim() || fallback;
 const num = (name: string, fallback: number) => { const v = Number(process.env[name]); return process.env[name]?.trim() && Number.isFinite(v) ? v : fallback; };
@@ -40,13 +41,6 @@ export const config = {
     // com o vocabulário da base. false = índice inteiro na RAM.
     get sparseOnDisk() { return str("QDRANT_SPARSE_ON_DISK", "true") !== "false"; },
   },
-  // Ollama no Windows 11 (fora do Docker). Modelos separados: LLM e embeddings.
-  ollama: {
-    baseUrl: trimSlash(str("OLLAMA_BASE_URL")),
-    apiKey: str("OLLAMA_API_KEY"),
-    llmModel: str("OLLAMA_LLM_MODEL", str("OLLAMA_CHAT_MODEL")),
-    embeddingModel: str("OLLAMA_EMBEDDING_MODEL"),
-  },
   // BM25 (vetores esparsos): o Qdrant aplica o IDF (modifier "idf"); a aplicação envia o termo de frequência saturado.
   bm25: { k1: num("BM25_K1", 1.4), b: num("BM25_B", 0.75), avgLen: num("BM25_AVG_DOC_LEN", 80) },
 };
@@ -56,13 +50,9 @@ export function validateConfig() {
   const missing = [
     ["MASTER_USER", str("MASTER_USER")], ["MASTER_PASSWORD", str("MASTER_PASSWORD")],
     ["QDRANT_URL", str("QDRANT_URL")], ["QDRANT_API_KEY", config.qdrant.apiKey],
-    ["OLLAMA_BASE_URL", config.ollama.baseUrl], ["OLLAMA_LLM_MODEL", config.ollama.llmModel], ["OLLAMA_EMBEDDING_MODEL", config.ollama.embeddingModel],
   ].filter(([, v]) => !v).map(([k]) => k);
   if (missing.length) throw new Error(`Variáveis de ambiente obrigatórias ausentes: ${missing.join(", ")}. Veja .env.example.`);
-  for (const [name, url] of [["QDRANT_URL", config.qdrant.url], ["OLLAMA_BASE_URL", config.ollama.baseUrl]] as const)
-    if (!/^https?:\/\/[^\s/]+/.test(url)) throw new Error(`${name} inválida: "${url}". Use http://host:porta.`);
-  if (/\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(config.ollama.baseUrl) && fs.existsSync("/.dockerenv"))
-    console.warn(`[Config] OLLAMA_BASE_URL=${config.ollama.baseUrl} aponta para o próprio container. Use o IP do Windows visto pelo WSL2 (scripts/windows/ollama-wsl-bridge.ps1).`);
+  if (!/^https?:\/\/[^\s/]+/.test(config.qdrant.url)) throw new Error(`QDRANT_URL inválida: "${config.qdrant.url}". Use http://host:porta.`);
   warnNetworkFilesystem();
 }
 

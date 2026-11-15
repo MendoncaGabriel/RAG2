@@ -55,6 +55,7 @@
       .msg-act{@apply inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-xs transition-colors}
       .msg-user .msg-act{@apply text-white/80 hover:bg-white/10 hover:text-white}
       .msg-bot .msg-act{@apply text-ink-muted hover:bg-canvas hover:text-heading}
+      .mention{@apply rounded bg-white/20 px-1 font-medium}
       .chip{@apply inline-flex cursor-help items-center gap-1 rounded-md bg-canvas px-1.5 py-0.5 text-xs text-ink-muted}
     }
   </style>
@@ -153,9 +154,10 @@
           <div class="grid grid-cols-4 gap-2">
             <button id="addText" class="tool-btn" title="Colar um texto como documento"><i data-lucide="file-text" class="h-4 w-4"></i><span>Texto</span></button>
             <button id="importFolder" class="tool-btn" title="Importa em lote os arquivos de uma pasta do servidor (IMPORT_DIR), sem copiá-los; arquivos repetidos são ignorados"><i data-lucide="folder-input" class="h-4 w-4"></i><span>Pasta</span></button>
-            <button id="onePage" class="tool-btn" title="Gera um resumo detalhado, em uma página (A4), de todos os documentos para download"><i data-lucide="file-down" class="h-4 w-4"></i><span>One page</span></button>
+            <button id="onePage" class="tool-btn" title="A IA lê todos os documentos por inteiro e gera um documento estruturado com o resumo geral do notebook, para download"><i data-lucide="file-down" class="h-4 w-4"></i><span>One page</span></button>
             <button id="reindex" class="tool-btn" title="Recalcula os vetores de todos os documentos e mensagens salvas com o modelo de embeddings atual"><i data-lucide="refresh-cw" class="h-4 w-4"></i><span>Reindexar</span></button>
           </div>
+          <div id="onePageStatus" class="hidden rounded-lg border border-line bg-canvas p-2.5" aria-live="polite"></div>
         </div>
         <input id="fileInput" type="file" multiple class="hidden">
         <div id="documents" class="scroll-thin min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-4"></div>
@@ -164,19 +166,18 @@
       </aside>
 
       <section data-panel="chat" class="panel" aria-label="Conversa">
-        <div class="panel-head"><div class="flex min-w-0 items-center gap-2"><i data-lucide="messages-square" class="h-4 w-4 shrink-0 text-jabil-medium"></i><h2 id="chatTitle" class="truncate font-semibold text-heading">Conversa</h2></div><button id="newChat" class="btn btn-secondary btn-sm"><i data-lucide="plus" class="h-4 w-4"></i><span>Nova conversa</span></button></div>
+        <div class="panel-head"><div class="flex min-w-0 items-center gap-2"><i data-lucide="messages-square" class="h-4 w-4 shrink-0 text-jabil-medium"></i><h2 id="chatTitle" class="truncate font-semibold text-heading">Conversa</h2></div><div class="flex shrink-0 items-center gap-2"><button id="saveChat" type="button" class="btn btn-secondary btn-sm" aria-pressed="false" title="Salvar esta conversa na lista"><i data-lucide="bookmark" class="h-4 w-4"></i><span>Salvar conversa</span></button><button id="newChat" class="btn btn-secondary btn-sm"><i data-lucide="plus" class="h-4 w-4"></i><span>Nova conversa</span></button></div></div>
         <div id="messages" class="scroll-thin min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain bg-canvas p-3 sm:p-5"></div>
         <div id="focusBar" class="hidden shrink-0 items-center gap-2 border-t border-line bg-canvas px-4 py-1.5 text-xs text-ink-muted"><i data-lucide="crosshair" class="h-3.5 w-3.5 shrink-0 text-jabil-medium"></i><span id="focusText" class="min-w-0 flex-1 truncate"></span><button type="button" id="focusClear" class="btn btn-ghost btn-sm">Todos os documentos</button></div>
         <form id="askForm" class="shrink-0 border-t border-line bg-surface p-3 sm:p-4">
-          <div class="rounded-xl border border-line bg-surface transition-shadow focus-within:border-jabil-light focus-within:ring-2 focus-within:ring-jabil-light/25">
+          <div class="relative rounded-xl border border-line bg-surface transition-shadow focus-within:border-jabil-light focus-within:ring-2 focus-within:ring-jabil-light/25">
             <label for="question" class="sr-only">Pergunta</label>
-            <textarea id="question" rows="1" maxlength="5000" required placeholder="Pergunte sobre os documentos…" class="scroll-thin block max-h-40 w-full resize-none rounded-t-xl bg-transparent px-3 pb-1 pt-3 text-base text-ink placeholder:text-ink-soft focus:outline-none"></textarea>
+            <div id="mentionMenu" role="listbox" aria-label="Documentos para focar" class="scroll-thin absolute inset-x-0 bottom-full z-20 mb-2 hidden max-h-72 overflow-y-auto rounded-xl border border-line bg-surface py-1 shadow-lg"></div>
+            <textarea id="question" role="combobox" aria-autocomplete="list" aria-controls="mentionMenu" aria-expanded="false" rows="1" maxlength="5000" required placeholder="Pergunte sobre os documentos… (@ foca um documento)" class="scroll-thin block max-h-40 w-full resize-none rounded-t-xl bg-transparent px-3 pb-1 pt-3 text-base text-ink placeholder:text-ink-soft focus:outline-none"></textarea>
             <div class="flex flex-wrap items-center gap-2 p-2">
-              <button type="button" id="detailToggle" role="switch" aria-checked="false" title="Desligado: respostas rápidas e resumidas. Ligado: respostas mais demoradas, longas e detalhadas." class="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="detailTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="detailKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="detailLabel">Rápido</span></button>
-              <button type="button" id="creativeToggle" role="switch" aria-checked="false" title="Rígido: respostas presas ao texto dos documentos. Flexível: a IA ganha um pouco mais de liberdade para elaborar e explicar com as próprias palavras (sem sair do contexto)." class="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="creativeTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="creativeKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="creativeLabel">Rígido</span></button>
-              <button type="button" id="chatToggle" role="switch" aria-checked="false" title="Consulta: perguntas e respostas diretas sobre os documentos. Conversa: bata papo com a IA sobre o assunto; ela explica, ensina e tira dúvidas usando os documentos como base de conhecimento." class="inline-flex items-center gap-2 rounded-lg px-2 py-1.5 text-xs font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="chatTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="chatKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="chatLabel">Consulta</span></button>
               <span class="ml-auto hidden text-xs text-ink-muted lg:inline">Enter envia · Shift+Enter quebra linha</span>
-              <button id="voiceMode" type="button" class="btn btn-secondary ml-auto px-3 lg:ml-0" title="Conversar por voz (Ctrl+Shift+Espaço)" aria-label="Conversar por voz"><i data-lucide="audio-lines" class="h-4 w-4"></i><span class="hidden sm:inline">Voz</span></button>
+              <button id="chatOptions" type="button" class="btn btn-secondary ml-auto px-3 lg:ml-0" title="Opções da resposta" aria-label="Opções da resposta" aria-haspopup="dialog"><i data-lucide="settings" class="h-4 w-4"></i></button>
+              <button id="voiceMode" type="button" class="btn btn-secondary px-3" title="Conversar por voz (Ctrl+Shift+Espaço)" aria-label="Conversar por voz"><i data-lucide="audio-lines" class="h-4 w-4"></i><span class="hidden sm:inline">Voz</span></button>
               <button id="send" type="submit" class="btn btn-primary"><i data-lucide="send" class="h-4 w-4"></i><span>Enviar</span></button>
             </div>
           </div>
@@ -185,7 +186,7 @@
 
       <aside data-panel="history" class="panel" aria-label="Histórico">
         <div class="panel-inner">
-        <div class="panel-head"><h2 class="panel-title"><i data-lucide="history" class="h-4 w-4 shrink-0"></i>Conversas</h2><div class="flex items-center gap-1"><span class="text-xs text-ink-muted">Recentes</span><button type="button" data-collapse="right" class="icon-btn hidden h-8 w-8 xl:inline-grid" title="Recolher Conversas" aria-label="Recolher Conversas"><i data-lucide="panel-right-close" class="h-4 w-4"></i></button></div></div>
+        <div class="panel-head"><h2 class="panel-title"><i data-lucide="history" class="h-4 w-4 shrink-0"></i>Conversas</h2><div class="flex items-center gap-1"><span class="text-xs text-ink-muted">Salvas</span><button type="button" data-collapse="right" class="icon-btn hidden h-8 w-8 xl:inline-grid" title="Recolher Conversas" aria-label="Recolher Conversas"><i data-lucide="panel-right-close" class="h-4 w-4"></i></button></div></div>
         <div id="chatList" class="scroll-thin max-h-[42%] shrink-0 space-y-0.5 overflow-y-auto p-2"></div>
         <div class="panel-head border-t"><h2 class="panel-title"><i data-lucide="bookmark" class="h-4 w-4 shrink-0"></i>Mensagens salvas</h2></div>
         <div id="savedList" class="scroll-thin min-h-0 flex-1 space-y-2 overflow-y-auto overscroll-contain p-3"></div>
@@ -198,8 +199,17 @@
   <main id="settings" class="mx-auto hidden w-full max-w-4xl px-4 py-6 sm:px-6 sm:py-10">
     <div class="mb-6 flex items-start gap-3">
       <button id="settingsBack" class="icon-btn border border-line bg-surface" title="Voltar" aria-label="Voltar"><i data-lucide="arrow-left" class="h-4 w-4"></i></button>
-      <div><p class="kicker">Bento</p><h1 class="mt-1 text-2xl font-bold text-heading sm:text-3xl">Configurações de IA</h1><p class="mt-1.5 text-sm text-ink-muted sm:text-base">Duas coisas independentes: a IA que responde (chat) e o modelo que busca nos documentos (embeddings).</p></div>
+      <div><p class="kicker">Bento</p><h1 class="mt-1 text-2xl font-bold text-heading sm:text-3xl">Configurações de IA</h1><p class="mt-1.5 text-sm text-ink-muted sm:text-base">Duas coisas independentes: a IA que responde (chat) e o modelo que busca nos documentos (embeddings). Tudo é configurado aqui: não há mais variáveis de ambiente para a IA.</p></div>
     </div>
+
+    <section class="card mb-6 p-4 sm:p-6">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div class="min-w-0 flex-1"><div class="flex items-center gap-2"><i data-lucide="zap" class="h-4 w-4 text-jabil-medium"></i><h2 class="text-lg font-semibold text-heading">Configuração automática</h2></div>
+        <p class="mt-1 text-sm text-ink-muted">Procura o Ollama neste computador, escolhe entre os modelos já instalados e deixa em uso o que ainda estiver sem escolha. Depois você pode trocar tudo manualmente abaixo.</p></div>
+        <button id="autoConfig" class="btn btn-primary"><i data-lucide="zap" class="h-4 w-4"></i>Configurar automaticamente</button>
+      </div>
+      <p id="autoMsg" class="alert mt-4 hidden text-sm"></p>
+    </section>
 
     <section class="card mb-6 p-4 sm:p-6">
       <div class="mb-1 flex flex-wrap items-center gap-2"><i data-lucide="message-square" class="h-4 w-4 text-jabil-medium"></i><h2 class="text-lg font-semibold text-heading">IA de chat</h2><span id="savedChat" class="text-xs font-medium text-ok-ink"></span></div>
@@ -217,36 +227,90 @@
       <div class="mb-3 mt-6 flex flex-wrap items-center justify-between gap-3"><h3 class="text-sm font-semibold text-ink">Cadastradas</h3><button data-add="embedding" class="btn btn-primary"><i data-lucide="plus" class="h-4 w-4"></i>Adicionar embeddings</button></div>
       <div id="listEmbedding" class="space-y-3"></div>
     </section>
+
+    <section class="card mb-6 p-4 sm:p-6">
+      <div class="mb-1 flex flex-wrap items-center gap-2"><i data-lucide="sliders-horizontal" class="h-4 w-4 text-jabil-medium"></i><h2 class="text-lg font-semibold text-heading">Contexto e desempenho</h2><span id="savedTuning" class="text-xs font-medium text-ok-ink"></span></div>
+      <p class="text-sm text-ink-muted">No <b>Automático</b> o sistema escolhe pelo tamanho e pelo contexto do modelo de chat em uso e mede as threads neste computador. Escolha <b>Manual</b> para fixar um valor; ele vale para qualquer modelo (o contexto nunca passa do que o modelo suporta).</p>
+      <p id="tuneModel" class="mt-2 text-xs text-ink-muted"></p>
+      <div id="tuneRows" class="mt-4 divide-y divide-line"></div>
+      <p id="tuneError" class="alert alert-error mt-4 hidden text-sm"></p>
+      <div class="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button id="tuneReset" class="btn btn-secondary">Tudo automático</button><button id="tuneSave" class="btn btn-primary">Salvar ajustes</button></div>
+    </section>
   </main>
 
   <dialog id="providerDialog" class="dialog w-[min(94vw,560px)]">
     <form id="providerForm" class="p-5 sm:p-6" autocomplete="off">
       <div id="providerKicker" class="kicker mb-1">IA de chat</div>
-      <h2 id="providerTitle" class="text-xl font-semibold text-heading">Nova IA</h2>
-      <div class="mt-5 space-y-4">
-        <label id="presetRow" class="block"><span class="label">Começar de um modelo pronto</span><select id="pfPreset" class="field"></select></label>
-        <label class="block"><span class="label">Nome</span><input id="pfName" required maxlength="80" placeholder="Ex.: Ollama notebook" class="field"></label>
-        <input id="pfKind" type="hidden" value="ollama">
-        <label class="block"><span class="label">URL base</span><input id="pfBaseUrl" required maxlength="300" class="field font-mono"></label>
-        <div><label for="pfKey" class="label">Chave de API <span class="font-normal text-ink-muted">· opcional</span></label>
-          <div class="flex gap-2"><input id="pfKey" type="password" maxlength="500" class="field min-w-0 flex-1 font-mono"><button type="button" id="pfKeyToggle" class="btn btn-secondary px-3">Ver</button></div>
-          <label id="pfClearRow" class="mt-2 hidden items-center gap-2 text-xs text-ink-muted"><input id="pfClear" type="checkbox" class="h-4 w-4 accent-jabil"> Remover a chave salva</label></div>
-        <div class="rounded-xl border border-line bg-canvas p-3">
-          <div class="mb-3 flex items-center justify-between gap-2"><span class="text-sm font-medium">Modelo</span><button type="button" id="pfFetch" class="btn btn-secondary btn-sm"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Buscar modelos</button></div>
-          <div class="space-y-3">
-            <label id="pfChatRow" class="block"><span class="label font-normal text-ink-muted">Modelo de chat</span><input id="pfChat" list="pfModels" maxlength="200" class="field" placeholder="ex.: qwen2.5:3b"></label>
-            <label id="pfEmbRow" class="block"><span class="label font-normal text-ink-muted">Modelo de embeddings</span><input id="pfEmb" list="pfModels" maxlength="200" class="field" placeholder="ex.: bge-m3"></label>
+      <h2 id="providerTitle" class="text-xl font-semibold text-heading">Adicionar IA de chat</h2>
+      <p id="providerLead" class="mt-1 text-sm text-ink-muted"></p>
+      <div class="mt-5 space-y-5">
+        <section>
+          <div class="mb-2 flex items-center gap-2"><span class="flex h-5 w-5 items-center justify-center rounded-full bg-jabil text-xs font-semibold text-white">1</span><h3 class="text-sm font-semibold text-ink">Servidor Ollama</h3></div>
+          <div class="flex gap-2"><input id="pfBaseUrl" required maxlength="300" placeholder="Procurando o Ollama…" aria-label="Endereço do servidor Ollama" class="field min-w-0 flex-1 font-mono"><button type="button" id="pfFetch" class="btn btn-secondary px-3"><i data-lucide="refresh-cw" class="h-3.5 w-3.5"></i>Atualizar</button></div>
+          <p id="pfFetchMsg" class="mt-2 text-xs text-ink-muted"></p>
+        </section>
+        <section>
+          <div class="mb-2 flex items-center gap-2"><span class="flex h-5 w-5 items-center justify-center rounded-full bg-jabil text-xs font-semibold text-white">2</span><h3 id="pfModelTitle" class="text-sm font-semibold text-ink">Modelo</h3></div>
+          <input id="pfModel" required maxlength="200" placeholder="Clique em um modelo abaixo ou digite o nome" aria-label="Modelo" class="field">
+          <div id="pfChips" class="mt-2 flex flex-wrap gap-2"></div>
+        </section>
+        <details class="rounded-xl border border-line bg-canvas p-3">
+          <summary class="cursor-pointer text-sm font-medium text-ink">Opções avançadas</summary>
+          <div class="mt-3 space-y-4">
+            <label class="block"><span class="label">Nome <span class="font-normal text-ink-muted">· opcional</span></span><input id="pfName" maxlength="80" placeholder="Se vazio, usa o endereço do servidor" class="field"></label>
+            <div><label for="pfKey" class="label">Chave de API <span class="font-normal text-ink-muted">· só se o servidor exigir</span></label>
+              <div class="flex gap-2"><input id="pfKey" type="password" maxlength="500" class="field min-w-0 flex-1 font-mono"><button type="button" id="pfKeyToggle" class="btn btn-secondary px-3">Ver</button></div>
+              <label id="pfClearRow" class="mt-2 hidden items-center gap-2 text-xs text-ink-muted"><input id="pfClear" type="checkbox" class="h-4 w-4 accent-jabil"> Remover a chave salva</label></div>
           </div>
-          <datalist id="pfModels"></datalist>
-          <p id="pfFetchMsg" class="mt-2 text-xs text-ink-muted">Digite o nome do modelo ou use “Buscar modelos”.</p>
-        </div>
+        </details>
         <p id="pfError" class="alert alert-error hidden"></p>
       </div>
       <div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" id="pfCancel" class="btn btn-secondary">Cancelar</button><button id="pfSave" class="btn btn-primary">Salvar</button></div>
     </form>
   </dialog>
+  <dialog id="optionsDialog" class="dialog w-[min(92vw,460px)]" aria-labelledby="optionsTitle">
+    <div class="p-5 sm:p-6">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <div class="kicker mb-1">Bento</div>
+          <h2 id="optionsTitle" class="text-xl font-semibold text-heading">Opções da resposta</h2>
+          <p class="mt-1 text-sm text-ink-muted">Ajuste como a IA responde nesta conversa.</p>
+        </div>
+        <button type="button" id="optionsX" class="icon-btn h-8 w-8 shrink-0" aria-label="Fechar"><i data-lucide="x" class="h-4 w-4"></i></button>
+      </div>
+
+      <ul class="mt-4 divide-y divide-line border-y border-line">
+        <li class="flex items-center justify-between gap-4 py-4">
+          <div class="min-w-0">
+            <p id="detailTitle" class="text-sm font-semibold text-heading">Profundidade</p>
+            <p class="mt-0.5 text-xs leading-relaxed text-ink-muted">Rápido: respostas curtas e resumidas. Detalhado: respostas mais longas e completas, porém mais demoradas.</p>
+          </div>
+          <button type="button" id="detailToggle" role="switch" aria-checked="false" aria-labelledby="detailTitle" class="inline-flex min-h-10 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 text-sm font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="detailTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="detailKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="detailLabel" class="w-[4.5rem] text-left">Rápido</span></button>
+        </li>
+        <li class="flex items-center justify-between gap-4 py-4">
+          <div class="min-w-0">
+            <p id="creativeTitle" class="text-sm font-semibold text-heading">Liberdade</p>
+            <p class="mt-0.5 text-xs leading-relaxed text-ink-muted">Rígido: respostas presas ao texto dos documentos. Flexível: a IA elabora e explica com as próprias palavras, sem sair do contexto.</p>
+          </div>
+          <button type="button" id="creativeToggle" role="switch" aria-checked="false" aria-labelledby="creativeTitle" class="inline-flex min-h-10 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 text-sm font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="creativeTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="creativeKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="creativeLabel" class="w-[4.5rem] text-left">Rígido</span></button>
+        </li>
+        <li class="flex items-center justify-between gap-4 py-4">
+          <div class="min-w-0">
+            <p id="chatTitleToggle" class="text-sm font-semibold text-heading">Estilo</p>
+            <p class="mt-0.5 text-xs leading-relaxed text-ink-muted">Consulta: perguntas e respostas diretas sobre os documentos. Conversa: papo com a IA sobre o assunto, usando os documentos como base.</p>
+          </div>
+          <button type="button" id="chatToggle" role="switch" aria-checked="false" aria-labelledby="chatTitleToggle" class="inline-flex min-h-10 shrink-0 items-center gap-2.5 rounded-lg px-2 py-1 text-sm font-medium text-ink-muted transition-colors hover:bg-canvas"><span id="chatTrack" class="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors"><span id="chatKnob" class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"></span></span><span id="chatLabel" class="w-[4.5rem] text-left">Consulta</span></button>
+        </li>
+      </ul>
+
+      <div class="mt-5 flex flex-col gap-2 sm:flex-row sm:justify-between sm:items-center">
+        <p class="hidden text-xs text-ink-muted sm:block">Preferências salvas neste navegador.</p>
+        <button type="button" id="optionsDone" class="btn btn-primary w-full sm:w-auto">Concluído</button>
+      </div>
+    </div>
+  </dialog>
   <dialog id="appModal" class="dialog w-[min(92vw,480px)]">
-    <form id="modalForm" class="p-5 sm:p-6"><div class="kicker mb-1">Bento</div><h2 id="modalTitle" class="text-xl font-semibold text-heading"></h2><p id="modalDescription" class="mt-2 text-sm text-ink-muted"></p><div id="modalFields" class="mt-5 space-y-4"></div><div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" id="modalCancel" class="btn btn-secondary">Cancelar</button><button type="submit" id="modalSubmit" class="btn btn-primary">Salvar</button></div></form>
+    <form id="modalForm" class="p-5 sm:p-6"><div class="kicker mb-1">Bento</div><h2 id="modalTitle" class="text-xl font-semibold text-heading"></h2><p id="modalDescription" class="mt-2 text-sm text-ink-muted whitespace-pre-line"></p><div id="modalFields" class="mt-5 space-y-4"></div><div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button type="button" id="modalCancel" class="btn btn-secondary">Cancelar</button><button type="submit" id="modalSubmit" class="btn btn-primary">Salvar</button></div></form>
   </dialog>
   <dialog id="systemDialog" class="dialog w-[min(92vw,680px)]">
     <div class="p-5 sm:p-6"><div class="flex items-start justify-between gap-4"><div><div class="kicker mb-1">Bento</div><h2 class="text-xl font-semibold text-heading">Informações do sistema</h2><p class="mt-1.5 text-sm text-ink-muted">Configuração, modelos e armazenamento.</p></div><button id="closeSystemInfo" class="icon-btn" title="Fechar" aria-label="Fechar"><i data-lucide="x" class="h-5 w-5"></i></button></div><div id="systemInfoContent" class="mt-5 space-y-4"><p class="text-sm text-ink-muted">Carregando informações…</p></div></div>

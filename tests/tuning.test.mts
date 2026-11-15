@@ -1,4 +1,4 @@
-// Ajuste automático ao PC (sem Ollama): núcleos físicos, candidatas de threads, escolha e sobrescrita manual.
+// Ajuste automático ao PC (sem Ollama): núcleos físicos, candidatas de threads, escolha e ajuste manual (Configurações).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -40,10 +40,12 @@ test("GPUs que não fazem inferência são ignoradas", () => {
   assert.deepEqual(realGpus(["Microsoft Basic Display Adapter", "AMD Radeon(TM) Graphics", "Microsoft Remote Display Adapter", ""]), ["AMD Radeon(TM) Graphics"]);
 });
 
-test("OLLAMA_NUM_THREAD sobrescreve o ajuste; sem nada, o Ollama decide", () => {
-  delete process.env.OLLAMA_NUM_THREAD;
+test("threads seguem as Configurações: Ollama decide por padrão, manual fixa, modo Ollama ignora a medição", async () => {
+  const { setAiTuning } = await import("../src/aisettings.js");
   assert.equal(tunedThreads("http://localhost:11434"), undefined);
-  process.env.OLLAMA_NUM_THREAD = "5";
+  setAiTuning({ threadMode: "manual", threads: 5 });
   assert.equal(tunedThreads("http://localhost:11434"), 5);
-  delete process.env.OLLAMA_NUM_THREAD;
+  setAiTuning({ threadMode: "ollama" });
+  assert.equal(tunedThreads("http://localhost:11434"), undefined);
+  setAiTuning({ threadMode: "auto", threads: 0 });
 });

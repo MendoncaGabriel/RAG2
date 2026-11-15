@@ -58,7 +58,8 @@ function familySampling(family: string, base: { temperature: number; topP: numbe
   }
 }
 
-export function deriveProfile(name: string, info?: ModelInfo): ModelProfile {
+// contextOverride (Configurações > Contexto manual): num_ctx fixo no lugar do da faixa, ainda limitado ao contexto nativo do modelo.
+export function deriveProfile(name: string, info?: ModelInfo, contextOverride = 0): ModelProfile {
   const metaSize = info?.parameterSize, nameSize = sizeFromName(name);
   const sizeB = metaSize || nameSize || 3, sizeSource = metaSize ? "metadados" : nameSize ? "nome" : "padrão";
   const family = familyOf(name, info?.family);
@@ -75,6 +76,7 @@ export function deriveProfile(name: string, info?: ModelInfo): ModelProfile {
   // Amostragem da família do pequeno em diante. Qwen3/Qwen3.5 não devem usar decodificação gulosa (laços de repetição), e a
   // penalidade 1.05 (no lugar de 1.1) atrapalha menos a cópia exata de códigos e valores.
   if (base.tier !== "mini") Object.assign(base, familySampling(family, base));
+  if (contextOverride >= 2048) base.contextTokens = Math.round(contextOverride);
   // Contexto nunca acima do que o modelo suporta; o texto recuperado encolhe junto (≈2,5 caracteres por token, com folga para prompt e resposta).
   const native = info?.contextLength || nativeContext(name, family);
   if (native && native < base.contextTokens) {

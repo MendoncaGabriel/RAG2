@@ -56,6 +56,9 @@ const documentColumns = new Set((db.prepare("SELECT name FROM pragma_table_info(
 if (!documentColumns.has("content_hash")) db.exec("ALTER TABLE documents ADD COLUMN content_hash TEXT");
 if (!documentColumns.has("external")) db.exec("ALTER TABLE documents ADD COLUMN external INTEGER NOT NULL DEFAULT 0");
 db.exec("CREATE INDEX IF NOT EXISTS documents_hash ON documents(notebook_id, content_hash)");
+// Conversas só entram na lista quando o usuário as salva (saved=1). Bancos antigos: as conversas que já existiam ficam salvas, para não sumirem.
+const conversationColumns = new Set((db.prepare("SELECT name FROM pragma_table_info('conversations')").all() as { name: string }[]).map(c => c.name));
+if (!conversationColumns.has("saved")) { db.exec("ALTER TABLE conversations ADD COLUMN saved INTEGER NOT NULL DEFAULT 0"); db.exec("UPDATE conversations SET saved=1"); }
 // Trechos ainda sem vetor denso (indexed=2), buscados pelo worker de embeddings em segundo plano.
 db.exec("CREATE INDEX IF NOT EXISTS chunks_dense ON chunks(indexed) WHERE indexed=2");
 db.exec("PRAGMA user_version = 4");

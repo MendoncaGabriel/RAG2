@@ -5,11 +5,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, prepareReranker, tuneTarget, uuid } from "./rag.js";
+import { ask, chatContext, prepareReranker, tuneTarget, tuningOverview, uuid } from "./rag.js";
+import { getAiTuning, setAiTuning, tuningLimits } from "./aisettings.js";
 import { autoTune } from "./tuning.js";
-import { activeSummary, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, ollamaStatus, providerKinds, setActive, testProvider, updateProvider } from "./ai.js";
-import { onePageFile, onePageJob, startDocumentSummary, startOnePage } from "./onepage.js";
-import { backfillRecords, duplicateOf, fileHash, fixMojibake, importFolder, importFolders, processDocument, recoverInterrupted, reindexDocument, removeDocument } from "./documents.js";
+import { activeSummary, autoConfigure, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, ollamaStatus, setActive, testProvider, updateProvider } from "./ai.js";
+import { cancelOnePage, onePageFile, onePageJob, onePageStatus, startOnePage } from "./onepage.js";
+import { backfillRecords, documentMentions, duplicateOf, fileHash, fixMojibake, importFolder, importFolders, processDocument, recoverInterrupted, reindexDocument, removeDocument } from "./documents.js";
 import { deleteNotebookVectors, deletePointVectors, denseStatus, indexSavedMessages, lastSyncReport, needsSync, reconcile, vectorModel } from "./indexing.js";
 import * as qdrant from "./qdrant.js";
 import { voiceRouter } from "./voice.js";
@@ -131,17 +132,17 @@ app.post("/api/notebooks/:id/reindex",(req,res)=>{ const nb=String(req.params.id
   void (async()=>{ for(const id of ids){ try{await reindexDocument(id)}catch(e){console.error("Reindexação:",e instanceof Error?e.message:String(e))} }
     try{await indexSavedMessages(nb,true)}catch(e){const msg=e instanceof Error?e.message:String(e);db.prepare("UPDATE saved_messages SET index_error=? WHERE notebook_id=? AND indexed=0").run(msg.slice(0,300),nb)}
     reindexing.delete(nb); })(); });
-// Resumo "one page" de todos os documentos: geração em segundo plano (um resumo por documento), status e download do HTML.
-app.post("/api/notebooks/:id/onepage",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); if(onePageJob(nb)?.status==="running")return res.status(409).json({error:"A geração já está em andamento."}); const j=startOnePage(nb); res.status(202).json({status:j.status,total:j.total}); });
-app.get("/api/notebooks/:id/onepage",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); const j=onePageJob(nb); res.json(j?{status:j.status,done:j.done,total:j.total,error:j.error}:{status:"none"}); });
-app.get("/api/notebooks/:id/onepage/download",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); const name=(db.prepare("SELECT name FROM notebooks WHERE id=?").get(nb) as {name:string}).name.replace(/[^\w.-]+/g,"_").slice(0,60)||"notebook"; res.download(onePageFile(nb),`one-page-${name}.html`,e=>{ if(e&&!res.headersSent)res.status(404).json({error:"Nenhum resumo gerado ainda."}); }); });
-// Resumo detalhado de um único documento (o texto inteiro, parte por parte): mesmo fluxo de geração, status e download.
-app.post("/api/documents/:id/summary",(req,res)=>{ const id=String(req.params.id); if(!db.prepare("SELECT 1 FROM documents WHERE id=?").get(id))return res.sendStatus(404); if(onePageJob(`doc-${id}`)?.status==="running")return res.status(409).json({error:"A geração já está em andamento."}); const j=startDocumentSummary(id); res.status(202).json({status:j.status,total:j.total}); });
-app.get("/api/documents/:id/summary",(req,res)=>{ const id=String(req.params.id); if(!db.prepare("SELECT 1 FROM documents WHERE id=?").get(id))return res.sendStatus(404); const j=onePageJob(`doc-${id}`); res.json(j?{status:j.status,done:j.done,total:j.total,error:j.error}:{status:"none"}); });
-app.get("/api/documents/:id/summary/download",(req,res)=>{ const id=String(req.params.id),d=db.prepare("SELECT name FROM documents WHERE id=?").get(id) as {name:string}|undefined; if(!d)return res.sendStatus(404); res.download(onePageFile(`doc-${id}`),`resumo-${d.name.replace(/\.[^.]+$/,"").replace(/[^\w.-]+/g,"_").slice(0,60)||"documento"}.html`,e=>{ if(e&&!res.headersSent)res.status(404).json({error:"Nenhum resumo gerado ainda."}); }); });
+// One page: documento estruturado que resume todo o notebook, gerado em segundo plano (leitura completa por janela deslizante).
+// Status com fase, etapas e estimativa; DELETE cancela (o progresso fica guardado e a próxima geração continua de onde parou).
+app.post("/api/notebooks/:id/onepage",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); if(onePageJob(nb)?.status==="running")return res.status(409).json({error:"A geração já está em andamento."}); res.status(202).json(onePageStatus(startOnePage(nb))); });
+app.get("/api/notebooks/:id/onepage",async(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); const j=onePageJob(nb); const file=await fs.stat(onePageFile(nb)).catch(()=>null); res.json({...(j?onePageStatus(j):{status:"none"}),available:!!file,generatedAt:file?.mtime.toISOString()}); });
+app.delete("/api/notebooks/:id/onepage",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); return cancelOnePage(nb)?res.json({ok:true}):res.status(409).json({error:"Nenhuma geração em andamento."}); });
+app.get("/api/notebooks/:id/onepage/download",(req,res)=>{ const nb=String(req.params.id); if(!existsNotebook(nb))return res.sendStatus(404); const name=(db.prepare("SELECT name FROM notebooks WHERE id=?").get(nb) as {name:string}).name.replace(/[^\w.-]+/g,"_").slice(0,60)||"notebook"; res.download(onePageFile(nb),`one-page-${name}.html`,e=>{ if(e&&!res.headersSent)res.status(404).json({error:"Nenhum One page gerado ainda."}); }); });
 app.delete("/api/documents/:id",async(req,res)=>{ try{const deleted=await removeDocument(req.params.id); return deleted?res.json({ok:true}):res.sendStatus(404)}catch(e){return fail(res,e)} });
 app.get("/api/notebooks/:id/conversations",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); res.json(db.prepare("SELECT * FROM conversations WHERE notebook_id=? ORDER BY created_at DESC").all(req.params.id)); });
-app.post("/api/notebooks/:id/conversations",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const id=uuid(); db.prepare("INSERT INTO conversations(id,notebook_id,title) VALUES(?,?,?)").run(id,req.params.id,String(req.body?.title||"Nova conversa").slice(0,120)); db.prepare("DELETE FROM conversations WHERE notebook_id=? AND id NOT IN (SELECT id FROM conversations WHERE notebook_id=? ORDER BY created_at DESC,id DESC LIMIT 100)").run(req.params.id,req.params.id); res.status(201).json({id}); });
+app.post("/api/notebooks/:id/conversations",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); const id=uuid(); db.prepare("INSERT INTO conversations(id,notebook_id,title) VALUES(?,?,?)").run(id,req.params.id,String(req.body?.title||"Nova conversa").slice(0,120)); db.prepare("DELETE FROM conversations WHERE notebook_id=? AND saved=0 AND id NOT IN (SELECT id FROM conversations WHERE notebook_id=? AND saved=0 ORDER BY created_at DESC,id DESC LIMIT 100)").run(req.params.id,req.params.id); res.status(201).json({id}); });
+// Salvar/remover da lista de conversas salvas: a conversa continua a mesma (as mensagens seguem sendo gravadas nela).
+app.patch("/api/conversations/:id",(req,res)=>{ if(typeof req.body?.saved!=="boolean")return res.status(400).json({error:"Campo saved (true/false) obrigatório."}); const result=db.prepare("UPDATE conversations SET saved=? WHERE id=?").run(req.body.saved?1:0,req.params.id); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 // Mensagens salvas da conversa saem junto (cascata no SQLite) e seus pontos saem do Qdrant.
 app.delete("/api/conversations/:id",async(req,res)=>{ const saved=(db.prepare("SELECT s.id FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE m.conversation_id=?").all(req.params.id) as {id:string}[]).map(s=>s.id); const result=db.prepare("DELETE FROM conversations WHERE id=?").run(req.params.id); await deletePointVectors(saved); return result.changes?res.json({ok:true}):res.sendStatus(404); });
 app.get("/api/notebooks/:id/saved-messages",(req,res)=>{ if(!existsNotebook(req.params.id))return res.sendStatus(404); res.json(db.prepare("SELECT s.id,s.title,s.created_at,m.id AS message_id,m.role,m.content,m.sources,s.indexed,s.index_error FROM saved_messages s JOIN messages m ON m.id=s.message_id WHERE s.notebook_id=? ORDER BY s.created_at DESC").all(req.params.id)); });
@@ -167,7 +168,8 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     const userId=uuid();
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
-    const result=await ask(conversation.notebook_id,question,{signal:abort.signal,history,detailed:req.body?.detailed===true,creative:req.body?.creative===true,conversational:req.body?.conversational===true,documentIds:Array.isArray(req.body?.documentIds)?req.body.documentIds.slice(0,500).map(String):undefined,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:(sources,stats)=>send({type:"sources",sources,stats})});
+    const mention=documentMentions(conversation.notebook_id,question),focusIds=Array.isArray(req.body?.documentIds)?req.body.documentIds.slice(0,500).map(String):[],documentIds=[...new Set([...focusIds,...mention.ids])];
+    const result=await ask(conversation.notebook_id,mention.text,{signal:abort.signal,history,detailed:req.body?.detailed===true,creative:req.body?.creative===true,conversational:req.body?.conversational===true,documentIds:documentIds.length?documentIds:undefined,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:(sources,stats)=>send({type:"sources",sources,stats})});
     const id=uuid();
     const durationMs=Date.now()-started;
     // Aproximação: cada pedaço de streaming ≈ 1 token; respostas determinísticas (1 pedaço) não têm taxa.
@@ -186,16 +188,21 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
 // Modo de voz (STT/TTS locais): só converte áudio <-> texto; a pergunta segue pelo endpoint de mensagens acima.
 app.use("/api/voice",voiceRouter());
 const aiError=(res:express.Response,e:unknown)=>res.status(400).json({error:e instanceof Error?e.message:String(e)});
-app.get("/api/ai/kinds",(_req,res)=>res.json(providerKinds));
 app.get("/api/ai/providers",(_req,res)=>res.json(listProviders()));
 app.post("/api/ai/providers",(req,res)=>{try{res.status(201).json(createProvider(req.body))}catch(e){aiError(res,e)}});
 app.put("/api/ai/providers/:id",(req,res)=>{try{const p=updateProvider(req.params.id,req.body);p?res.json(p):res.sendStatus(404)}catch(e){aiError(res,e)}});
 app.delete("/api/ai/providers/:id",(req,res)=>deleteProvider(req.params.id)?res.json({ok:true}):res.sendStatus(404));
 app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json(listProviders().active)}catch(e){aiError(res,e)}});
 app.get("/api/ai/status",(_req,res)=>res.json(activeSummary()));
+// Ajustes de IA (contexto, resposta, trechos, threads): 0 = automático (perfil do modelo / medido neste PC), valor > 0 = manual.
+app.get("/api/ai/tuning",async(_req,res)=>{try{res.json({settings:getAiTuning(),limits:tuningLimits,...await tuningOverview()})}catch(e){aiError(res,e)}});
+app.put("/api/ai/tuning",async(req,res)=>{try{const settings=setAiTuning(req.body);void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json({settings,...await tuningOverview()})}catch(e){aiError(res,e)}});
+// Configuração automática: procura o Ollama (localhost, IP do Windows visto pelo WSL2…), cadastra e escolhe modelos instalados.
+app.post("/api/ai/autoconfigure",async(_req,res)=>{try{const r=await autoConfigure();void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json(r)}catch(e){aiError(res,e)}});
 app.post("/api/ai/providers/:id/test",async(req,res)=>{const p=getProvider(req.params.id);if(!p)return res.sendStatus(404);res.json(await testProvider(p))});
 // Lista modelos do provedor; sem chave informada, usa a do provedor já cadastrado (providerId).
-app.post("/api/ai/models",async(req,res)=>{try{const saved=getProvider(String(req.body?.providerId||""));const kind=req.body?.kind||saved?.kind;res.json({models:await listModels({kind,baseUrl:req.body?.baseUrl||saved?.baseUrl,apiKey:req.body?.apiKey||(saved&&saved.kind===kind?saved.apiKey:"")})})}catch(e){aiError(res,e)}});
+// A chave salva só é usada quando o endereço é o do próprio cadastro (nunca enviada a outro servidor).
+app.post("/api/ai/models",async(req,res)=>{try{const saved=getProvider(String(req.body?.providerId||""));const baseUrl=String(req.body?.baseUrl||saved?.baseUrl||"").trim().replace(/\/+$/,"");const sameServer=!!saved&&baseUrl===saved.baseUrl;res.json(await listModels({baseUrl,apiKey:String(req.body?.apiKey||"")||(sameServer?saved!.apiKey:"")}))}catch(e){aiError(res,e)}});
 app.get("/api/system/info",async(_req,res)=>{
   const dirSize=async(dir:string):Promise<number>=>{let total=0;for(const entry of await fs.readdir(dir,{withFileTypes:true}).catch(()=>[])){const full=path.join(dir,entry.name);if(entry.isDirectory())total+=await dirSize(full);else if(entry.isFile())total+=(await fs.stat(full).catch(()=>({size:0}))).size}return total};
   const diskBytes=await Promise.all([dbPath,`${dbPath}-wal`,`${dbPath}-shm`].map(async file=>(await fs.stat(file).catch(()=>({size:0}))).size)).then(s=>s.reduce((a,b)=>a+b,0));

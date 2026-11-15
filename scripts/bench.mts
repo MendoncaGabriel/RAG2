@@ -20,8 +20,7 @@ const out = arg("out", "");
 const only = arg("only", "").split(",").filter(Boolean);
 const retrievalOnly = process.argv.includes("--retrieval");
 const distract = arg("distract", ""), distractMB = Number(arg("distract-mb", "0")) || Infinity;
-const chatModel = process.env.BENCH_CHAT_MODEL || process.env.OLLAMA_LLM_MODEL || "qwen3:1.7b", embeddingModel = process.env.BENCH_EMBED_MODEL || process.env.OLLAMA_EMBEDDING_MODEL || "bge-m3";
-const ollama = process.env.BENCH_OLLAMA_URL || process.env.OLLAMA_BASE_URL || "http://localhost:11434";
+const chatModel = process.env.BENCH_CHAT_MODEL || process.env.TEST_CHAT_MODEL || "qwen3:1.7b", embeddingModel = process.env.BENCH_EMBED_MODEL || process.env.TEST_EMBEDDING_MODEL || "bge-m3";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "rag-bench-"));
 process.env.SQLITE_PATH = path.join(tmp, "bench.sqlite");
@@ -45,6 +44,9 @@ const corpus = fs.readFileSync(path.join(root, "tests/fixtures/Base_RAG_Verdanis
 const norm = (t: string) => t.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 const abstained = (a: string) => /n[aã]o encontrei|n[aã]o (h[aá]|consta|existe|est[aá] dispon)|n[aã]o (possui|cont[eé]m|informa)|sem informa/i.test(a);
 
+// Servidor: BENCH_OLLAMA_URL / TEST_OLLAMA_URL ou, sem eles, o Ollama detectado (a IA da aplicação vem das Configurações, não do .env).
+const ollama = process.env.BENCH_OLLAMA_URL || process.env.TEST_OLLAMA_URL || (await ai.detectOllama())[0]?.baseUrl;
+if (!ollama) throw new Error("Ollama não encontrado: defina BENCH_OLLAMA_URL (IP do Windows visto pelo WSL2).");
 const provider = ai.createProvider({ name: "Ollama bench", kind: "ollama", baseUrl: ollama, chatModel, embeddingModel });
 ai.setActive({ chat: provider.id, embedding: provider.id });
 const nb = "bench-nb", doc = "bench-doc";

@@ -16,6 +16,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { dataDir } from "./database.js";
 import { isReasoningOnly } from "./modelprofile.js";
+import { getAiTuning } from "./aisettings.js";
 
 export interface Hardware { cpu: string; logical: number; physical: number; ramGB: number; freeGB: number; gpus: string[] }
 export interface TuneTarget { baseUrl: string; apiKey?: string; chatModel: string; contextTokens: number; embedding?: { baseUrl: string; apiKey?: string; model: string } }
@@ -26,10 +27,12 @@ const exec = promisify(execFile);
 const cacheFile = () => path.join(dataDir, "tuning.json");
 let current: TuneResult | null = null;
 
-// Threads usadas nas chamadas ao Ollama: OLLAMA_NUM_THREAD (sobrescrita manual) > valor medido para este servidor > padrão do Ollama.
+// Threads usadas nas chamadas ao Ollama, conforme Configurações: manual (valor fixo) > automático (medido para este servidor) >
+// "Ollama decide" (sem num_thread). Sem medição ainda, o Ollama decide.
 export function tunedThreads(baseUrl: string): number | undefined {
-  const manual = Number(process.env.OLLAMA_NUM_THREAD);
-  if (manual > 0) return manual;
+  const t = getAiTuning();
+  if (t.threadMode === "manual" && t.threads > 0) return t.threads;
+  if (t.threadMode === "ollama") return undefined;
   return current && current.baseUrl === baseUrl ? current.numThread : undefined;
 }
 export const tuningSummary = () => current;
@@ -157,16 +160,16 @@ export async function autoTune(t: TuneTarget | null, opts: { force?: boolean; lo
   const t0 = Date.now();
   const hw = await detectHardware();
   log(`${hw.cpu} · ${hw.physical} núcleos físicos / ${hw.logical} lógicos · RAM ${hw.ramGB} GB (${hw.freeGB} GB livres) · GPU: ${hw.gpus.join(", ") || "nenhuma detectada"}`);
-  if (!t?.chatModel) { log("nenhum modelo de chat ativo: ajuste pulado (configure em Configurações e reinicie, ou rode npm run tune)."); return null; }
+  if (!t?.chatModel) { log("nenhum modelo de chat ativo: ajuste pulado (escolha uma IA em Configurações)."); return null; }
   let version = "";
   try { version = String((await ollama(t.baseUrl, t.apiKey, "/api/version", undefined, 5_000)).version || ""); }
   catch { log(`Ollama indisponível em ${t.baseUrl}: ajuste adiado para a próxima inicialização (padrão do Ollama até lá).`); return null; }
 
-  const manual = Number(process.env.OLLAMA_NUM_THREAD) > 0;
+  const mode = getAiTuning().threadMode;
   const key = tuneKey(hw, t.baseUrl, version, t.chatModel), cached = readCache()[key];
   try {
-    if (process.env.AUTOTUNE === "false") log("AUTOTUNE=false: medição desligada.");
-    else if (manual) log(`OLLAMA_NUM_THREAD=${process.env.OLLAMA_NUM_THREAD} definido: usando o valor manual, sem medir.`);
+    if (mode === "ollama") log("threads: o Ollama decide (Configurações); medição desligada.");
+    else if (mode === "manual") log(`threads: ${getAiTuning().threads} (manual, Configurações); sem medir.`);
     else if (cached && !opts.force) { current = cached; log(`usando ajuste salvo de ${cached.at.slice(0, 10)}: ${cached.numThread ? `${cached.numThread} threads` : "threads automáticas do Ollama"} (${cached.device}). Para medir de novo: npm run tune.`); }
     else { current = await sweep(t, hw, key, log); writeCache(current); log(`escolhido: ${current.numThread ? `${current.numThread} threads` : `threads automáticas (modelo na ${current.device === "gpu" ? "GPU" : "CPU"})`}.`); }
   } catch (e) { log(`medição falhou (${e instanceof Error ? e.message : e}); seguindo com o padrão do Ollama.`); }

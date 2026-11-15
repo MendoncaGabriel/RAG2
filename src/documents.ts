@@ -255,3 +255,20 @@ export async function removeDocument(id: string) {
 export function recoverInterrupted() {
   db.prepare("UPDATE documents SET status='failed',error='Processamento interrompido; clique em Reprocessar.' WHERE status='processing' AND stage='extract'").run();
 }
+
+// Menções "@nome do documento" (autocompletar do chat): o documento mencionado entra no foco da pergunta e o nome sai do texto
+// usado na busca; a mensagem guardada fica como foi escrita. Só a menção, sem pergunta, vira pedido de resumo do documento.
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+export function documentMentions(notebookId: string, question: string): { text: string; ids: string[] } {
+  if (!question.includes("@")) return { text: question, ids: [] };
+  const docs = (db.prepare("SELECT id,name FROM documents WHERE notebook_id=? AND status='processed'").all(notebookId) as { id: string; name: string }[]).sort((a, b) => b.name.length - a.name.length);
+  let text = question; const ids: string[] = [];
+  for (const d of docs) {
+    // Nome inteiro seguido de fim, espaço ou pontuação ("@Manual.pdf, qual…"); o mais longo primeiro ("@Plano 2025" antes de "@Plano").
+    const re = new RegExp(`(?<![^\\s(\\["'“])@${escapeRe(d.name)}(?=$|[\\s,;:!?)\\]"'”]|\\.(?:\\s|$))`, "gi");
+    if (re.test(text)) { ids.push(d.id); text = text.replace(re, " "); }
+  }
+  text = text.replace(/[ \t]{2,}/g, " ").trim();
+  if (ids.length && !text.replace(/[\s,.;:!?]+/g, "")) text = ids.length === 1 ? "Resuma o documento." : "Resuma os documentos.";
+  return { text, ids };
+}

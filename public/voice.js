@@ -29,19 +29,20 @@
   #voice .v-answer{scrollbar-width:thin;scrollbar-color:rgba(21,190,240,.3) transparent;mask-image:linear-gradient(transparent 0,#000 1.25rem,#000 calc(100% - .5rem),transparent)}
   #voice .v-answer .markdown-body{color:#d7e3ec}#voice .v-answer strong{color:#fff}
   #voice .v-label{font-family:"Roboto Condensed",sans-serif;letter-spacing:.32em;text-transform:uppercase;font-weight:700;color:#15BEF0;text-shadow:0 0 18px rgba(21,190,240,.6)}
-  #voice .v-panel{background:rgba(3,20,35,.96);border:1px solid rgba(21,190,240,.3);backdrop-filter:blur(8px)}
+  #voice .v-panel{background:#031423;border:1px solid rgba(21,190,240,.4);box-shadow:0 0 0 1px rgba(0,0,0,.4),0 24px 60px rgba(0,0,0,.65);scrollbar-width:thin;scrollbar-color:rgba(21,190,240,.35) transparent}
+  @media (max-width:639px){#voice .v-panel{max-height:calc(100dvh - 5rem)}}
   #voice select,#voice input[type=range]{accent-color:#15BEF0}
   #voice .v-field{width:100%;border-radius:.5rem;border:1px solid rgba(21,190,240,.3);background:#06192a;color:#e6eaed;padding:.45rem .6rem;font-size:.875rem}
   #voice .v-sent{color:#fff;text-shadow:0 0 12px rgba(21,190,240,.35)}`;
   const html = `<div id="voice" class="hidden fixed inset-0 z-40 flex flex-col overflow-hidden" role="dialog" aria-modal="true" aria-label="Modo de voz">
     <div class="v-grid pointer-events-none absolute inset-0"></div>
-    <header class="relative z-10 flex items-center gap-3 px-4 pt-4 sm:px-8 sm:pt-6">
+    <header class="relative z-30 flex items-center gap-3 px-4 pt-4 sm:px-8 sm:pt-6">
       <div class="min-w-0"><div class="v-label text-[11px]">Bento · Voz</div><div id="vBook" class="truncate text-sm text-white/60"></div></div>
       <div class="ml-auto flex items-center gap-2">
         <button id="vSettingsBtn" class="v-btn !h-10 !min-w-10 !px-0" title="Voz e efeitos" aria-label="Configurações de voz" aria-expanded="false"><i data-lucide="sliders-horizontal" class="h-4 w-4"></i></button>
         <button id="vClose" class="v-btn !h-10 !min-w-10 !px-0" title="Fechar (Esc)" aria-label="Fechar modo de voz"><i data-lucide="x" class="h-5 w-5"></i></button>
       </div>
-      <div id="vSettings" class="v-panel absolute right-4 top-16 hidden w-[min(92vw,320px)] space-y-3 rounded-xl p-4 text-sm shadow-2xl sm:right-8 sm:top-20">
+      <div id="vSettings" class="v-panel fixed inset-x-3 top-16 hidden max-h-[calc(100dvh-5rem)] space-y-3 overflow-y-auto overscroll-contain rounded-xl p-4 text-sm shadow-2xl sm:inset-x-auto sm:right-8 sm:top-20 sm:w-[340px]" role="group" aria-label="Voz e efeitos">
         <label class="block"><span class="mb-1 block text-white/70">Voz em português</span><select id="vVoice" class="v-field"></select></label>
         <label class="block"><span class="mb-1 block text-white/70">Voz para respostas em inglês</span><select id="vVoiceEn" class="v-field"></select></label>
         <label class="block"><span class="mb-1 flex justify-between text-white/70">Velocidade <b id="vSpeedVal" class="font-medium text-white"></b></span><input id="vSpeed" type="range" min="0.8" max="1.3" step="0.05" class="w-full"></label>
@@ -78,7 +79,10 @@
     q('#vClose').onclick = close;
     q('#vMute').onclick = toggleMute;
     q('#vMain').onclick = mainAction; q('#vOrb').onclick = mainAction;
-    q('#vSettingsBtn').onclick = () => { const p = q('#vSettings'), open = p.classList.toggle('hidden'); q('#vSettingsBtn').setAttribute('aria-expanded', String(!open)) };
+    const setPanel = show => { q('#vSettings').classList.toggle('hidden', !show); q('#vSettingsBtn').setAttribute('aria-expanded', String(show)) };
+    q('#vSettingsBtn').onclick = () => setPanel(q('#vSettings').classList.contains('hidden'));
+    // Clique fora do painel de configurações o fecha (ele fica por cima do HUD).
+    root.addEventListener('pointerdown', e => { if (!q('#vSettings').classList.contains('hidden') && !e.target.closest('#vSettings,#vSettingsBtn')) setPanel(false) });
     const bind = (id, key, parse = v => v, after) => { const e = q(id); e.onchange = e.oninput = () => { prefs[key] = e.type === 'checkbox' ? e.checked : parse(e.value); savePrefs(); after?.() } };
     bind('#vVoice', 'voice', String, warmVoices); bind('#vVoiceEn', 'voiceEn', String, warmVoices); bind('#vSpeed', 'speed', Number, paintPrefs);
     bind('#vFx', 'fx', String, applyFx); bind('#vPause', 'pause', Number); bind('#vBarge', 'bargeIn'); bind('#vGreet', 'greet');
@@ -88,7 +92,8 @@
     q('#vReviewText').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReview() } });
     document.addEventListener('keydown', e => {
       if (root.classList.contains('hidden')) return;
-      if (e.key === 'Escape' && state === 'review') { e.preventDefault(); hideReview(); setState('listening') }
+      if (e.key === 'Escape' && !q('#vSettings').classList.contains('hidden')) { e.preventDefault(); setPanel(false) }
+      else if (e.key === 'Escape' && state === 'review') { e.preventDefault(); hideReview(); setState('listening') }
       else if (e.key === 'Escape') { e.preventDefault(); close() }
       else if (e.target.closest?.('select,input,textarea')) return;
       else if (e.code === 'Space') { if (e.target.closest?.('button')) return; e.preventDefault(); mainAction() } // em botão, o próprio clique nativo age
@@ -126,7 +131,9 @@
   async function open() {
     if (typeof conversation === 'undefined' || !conversation) return toast('Abra uma conversa primeiro');
     build(); paintPrefs(); used = false; muted = false; turn = null; lastCapture = null; hideReview(); showUser(''); $q('#vAnswer').innerHTML = ''; delete $q('#vAnswer').dataset.text;
-    $q('#vBook').textContent = document.getElementById('bookTitle')?.textContent || '';
+    // Documentos focados no chat valem também na voz: o topo avisa em quais a pergunta vai buscar.
+    const focused = typeof focus !== 'undefined' ? focus.size : 0;
+    $q('#vBook').textContent = (document.getElementById('bookTitle')?.textContent || '') + (focused ? ` · só ${focused} documento${focused === 1 ? '' : 's'} focado${focused === 1 ? '' : 's'}` : '');
     $q('#vMute').setAttribute('aria-pressed', 'false');
     root.classList.remove('hidden'); document.body.style.overflow = 'hidden'; $q('#vMain').focus();
     const my = ++session; progress = 0; setState('boot', 'Preparando microfone e modelos de voz…');
@@ -309,7 +316,7 @@
   async function ask(content, t) {
     setState('thinking'); showUser(content); $q('#vAnswer').innerHTML = '';
     try {
-      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode, conversational: typeof chatMode !== 'undefined' && chatMode }), signal: t.ctrl.signal });
+      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode, conversational: typeof chatMode !== 'undefined' && chatMode, documentIds: typeof focus !== 'undefined' && focus.size ? [...focus] : undefined }), signal: t.ctrl.signal });
       if (res.status === 401) return location.replace('/login.html');
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw Error(d.error || `Erro ${res.status}`) }
       used = true;

@@ -2,7 +2,7 @@
 #   docker compose up -d --build          → app em http://localhost:${PORT:-3000}
 #   docker compose down                   → para (os dados ficam em ${VOLUMES_DIR:-./volumes})
 #   docker compose --profile test run --rm tests   → testes unitários + integração reais
-# Serviços: aplicação Node.js e Qdrant, numa rede interna. O Ollama NÃO roda aqui: é o do Windows 11 (OLLAMA_BASE_URL).
+# Serviços: aplicação Node.js e Qdrant, numa rede interna. O Ollama NÃO roda aqui: é o do Windows 11, cadastrado na tela de Configurações (nada de IA no .env).
 # Volumes: Qdrant e SQLite exigem disco local POSIX (ext4 do WSL); não use pastas do Windows (/mnt/c) em VOLUMES_DIR.
 name: rag
 
@@ -21,13 +21,6 @@ x-app-env: &app-env
   QDRANT_QUANTIZATION: ${QDRANT_QUANTIZATION:-int8}
   QDRANT_QUANTIZED_IN_RAM: ${QDRANT_QUANTIZED_IN_RAM:-true}
   QDRANT_SPARSE_ON_DISK: ${QDRANT_SPARSE_ON_DISK:-true}
-  # Ollama do Windows 11 (IP do Windows visto pelo WSL2; ver scripts/windows/ollama-wsl-bridge.ps1).
-  OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:?defina OLLAMA_BASE_URL no .env (IP do Windows visto pelo WSL2)}
-  OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-  OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:?defina OLLAMA_LLM_MODEL no .env}
-  OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:?defina OLLAMA_EMBEDDING_MODEL no .env}
-  OLLAMA_NUM_THREAD: ${OLLAMA_NUM_THREAD:-}
-  AUTOTUNE: ${AUTOTUNE:-true}
   # Ingestão e chunking.
   OCR_LANG: ${OCR_LANG:-por+eng}
   IMPORT_PATH: /app/import
@@ -37,12 +30,9 @@ x-app-env: &app-env
   DOCUMENT_PROCESS_CONCURRENCY: ${DOCUMENT_PROCESS_CONCURRENCY:-1}
   EMBED_BATCH_SIZE: ${EMBED_BATCH_SIZE:-8}
   BM25_AVG_DOC_LEN: ${BM25_AVG_DOC_LEN:-80}
-  # Recuperação e geração (vazio = decidido pelo perfil do modelo).
-  RETRIEVAL_TOP_K: ${RETRIEVAL_TOP_K:-}
+  # Recuperação e geração. Servidor/modelos de IA, contexto, tamanho da resposta, trechos por pergunta e threads: tela de Configurações.
   MIN_RELEVANCE_SCORE: ${MIN_RELEVANCE_SCORE:-0.48}
-  MAX_CONTEXT_CHARS: ${MAX_CONTEXT_CHARS:-}
   NEIGHBOR_EXPAND_TOP: ${NEIGHBOR_EXPAND_TOP:-}
-  CHAT_MAX_TOKENS: ${CHAT_MAX_TOKENS:-}
   # Reranking local (Cross-Encoder ONNX em CPU): modelo baixado no 1º uso para APP_DATA_DIR/reranker.
   RERANK_ENABLED: ${RERANK_ENABLED:-true}
   RERANK_MODEL: ${RERANK_MODEL:-cross-encoder/mmarco-mMiniLMv2-L12-H384-v1}
@@ -159,6 +149,10 @@ services:
       <<: *app-env
       MASTER_USER: test
       MASTER_PASSWORD: test
+      # Integração/benchmark: Ollama usado nos testes (vazio = detectado). Não toca nas Configurações da aplicação.
+      TEST_OLLAMA_URL: ${TEST_OLLAMA_URL:-}
+      TEST_CHAT_MODEL: ${TEST_CHAT_MODEL:-}
+      TEST_EMBEDDING_MODEL: ${TEST_EMBEDDING_MODEL:-}
     command: ["npm", "test"]
     security_opt: ["no-new-privileges:true"]
     cap_drop: [ALL]
