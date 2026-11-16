@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { db } from "./database.js";
 import { networkCause } from "./qdrant.js";
 import { deriveProfile, embeddingPrefix, isReasoningOnly, sizeFromDetails, type ModelInfo } from "./modelprofile.js";
-import { tunedThreads } from "./tuning.js";
+import { deviceOptions, tunedThreads } from "./tuning.js";
 
 // Camada única de IA: servidores Ollama cadastrados pelo usuário (tela de Configurações, ou detecção automática) e dois "slots" ativos,
 // um para chat e outro para embeddings. Nada aqui depende de variáveis de ambiente.
@@ -95,7 +95,7 @@ export function activeSummary() {
 // pelo WSL e gateway), pela ponte de scripts/windows/ollama-wsl-bridge.ps1. Só endereços locais são testados, nunca um destino informado.
 const readText = (file: string) => { try { return fs.readFileSync(file, "utf8"); } catch { return ""; } };
 export function candidateUrls(): string[] {
-  const hosts = new Set<string>(["localhost", "host.docker.internal"]);
+  const hosts = new Set<string>(["localhost", "host.docker.internal", "172.17.0.1"]);
   for (const m of readText("/etc/resolv.conf").matchAll(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/g)) hosts.add(m[1]);
   for (const line of readText("/proc/net/route").split("\n").slice(1)) {
     const c = line.trim().split(/\s+/);
@@ -135,9 +135,9 @@ export function pickModels(models: string[]) {
 // Um clique: acha o Ollama, escolhe modelos instalados, cadastra e põe em uso o que ainda estiver sem escolha (não troca o que o usuário já usa).
 export async function autoConfigure() {
   const found = await detectOllama();
-  if (!found.length) throw new Error(`Nenhum Ollama encontrado automaticamente (testei este computador, o DNS e o gateway do WSL2 e os gateways 172.16–31.x). ${bridgeHint} Se o servidor estiver em outro endereço, cadastre-o manualmente.`);
+  if (!found.length) throw new Error(`Nenhum Ollama encontrado automaticamente (testei este computador, host.docker.internal, a rede do Docker, o DNS e o gateway do WSL2 e os gateways 172.16–31.x). ${bridgeHint} Se o servidor estiver em outro endereço, cadastre-o manualmente.`);
   const server = found.find(f => f.models.length) ?? found[0], picked = pickModels(server.models);
-  if (!picked.chat && !picked.embedding) throw new Error(`O Ollama em ${server.baseUrl} não tem modelos instalados. No Windows, execute "ollama pull qwen3:1.7b" e "ollama pull bge-m3", ou cadastre outro modelo manualmente.`);
+  if (!picked.chat && !picked.embedding) throw new Error(`O Ollama em ${server.baseUrl} não tem modelos instalados. No computador do Ollama, execute "ollama pull qwen3:1.7b" e "ollama pull bge-m3", ou cadastre outro modelo manualmente.`);
   const existing = listProviders().providers.find(p => p.baseUrl === server.baseUrl);
   const saved = existing
     ? updateProvider(existing.id, { name: existing.name, baseUrl: existing.baseUrl, chatModel: existing.chatModel || picked.chat, embeddingModel: existing.embeddingModel || picked.embedding })!
@@ -149,7 +149,7 @@ export async function autoConfigure() {
 }
 
 // ---------- HTTP ----------
-const bridgeHint = "Confira se o Ollama está aberto no Windows e se a ponte WSL2 está ativa (scripts/windows/ollama-wsl-bridge.ps1; o IP do Windows muda se o WSL trocar de sub-rede).";
+const bridgeHint = "Confira se o Ollama está aberto. Windows com WSL2: a ponte precisa estar ativa (scripts/windows/ollama-wsl-bridge.ps1; o IP do Windows muda se o WSL trocar de sub-rede). Linux: rode `sudo bash scripts/linux/ollama-docker-bridge.sh` (o Ollama em 127.0.0.1 não é visto pelo container).";
 async function http(label: string, url: string, init: { headers?: Record<string, string>; json?: unknown; timeout?: number; signal?: AbortSignal }) {
   const res = await fetch(url, { method: init.json === undefined ? "GET" : "POST", headers: { ...(init.json === undefined ? {} : { "content-type": "application/json" }), ...init.headers }, body: init.json === undefined ? undefined : JSON.stringify(init.json), signal: init.signal ? AbortSignal.any([init.signal, AbortSignal.timeout(init.timeout ?? 180_000)]) : AbortSignal.timeout(init.timeout ?? 180_000) }).catch(e => { if (init.signal?.aborted) throw e; throw new Error(`${label}: não foi possível conectar a ${new URL(url).origin} (${networkCause(e)}). ${bridgeHint}`); });
   return res;
@@ -240,7 +240,7 @@ export async function refreshModelInfo(p: Provider | null): Promise<ModelInfo | 
 
 // Threads do Ollama: conforme Configurações: medidas para este PC (tuning.ts), valor manual ou o Ollama decide.
 // O mesmo valor em todas as chamadas: trocar num_thread entre chamadas faz o Ollama recarregar o modelo.
-const threadOption = (p: Provider) => { const n = tunedThreads(p.baseUrl); return n ? { num_thread: n } : {}; };
+const threadOption = (p: Provider) => { const n = tunedThreads(p.baseUrl); return { ...(n ? { num_thread: n } : {}), ...deviceOptions() }; };
 
 // ---------- Chat ----------
 export type Msg = { role: "system" | "user" | "assistant"; content: string };

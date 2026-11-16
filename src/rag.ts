@@ -3,7 +3,8 @@ import { db } from "./database.js";
 import { activeProvider, cachedModelInfo, chat, embedMany, refreshModelInfo } from "./ai.js";
 import { deriveProfile, isCompact } from "./modelprofile.js";
 import { getAiTuning } from "./aisettings.js";
-import { tunedThreads, tuningSummary } from "./tuning.js";
+import { autoTune, detectHardware, tunedThreads, tuningResults, tuningStatus, tuningSummary } from "./tuning.js";
+import type { DeviceMode } from "./aisettings.js";
 import { analyzeQuery, extractCodes, structuredQuery, type QueryIntent, type Source } from "./structured.js";
 import { normalizeText, stemTokens, stopWords } from "./sparse.js";
 import { activeEmbeddingModel, denseScores, indexSavedMessages, reconcile, searchCandidates, vectorModel, withQuestion } from "./indexing.js";
@@ -316,9 +317,12 @@ export async function tuningOverview() {
   const measured = tuningSummary();
   return { model: p?.chatModel || null, tier: auto.tier, family: auto.family, sizeB: Number(auto.sizeB.toFixed(1)), nativeContext: info?.contextLength || null,
     auto: pick(auto), effective: pick(now),
-    threads: { measured: measured && p && measured.baseUrl === p.baseUrl ? { value: measured.numThread ?? null, device: measured.device } : null, effective: p ? tunedThreads(p.baseUrl) ?? null : null } };
+    threads: { run: tuningStatus(), results: p ? tuningResults(p.baseUrl, p.chatModel).map(r => ({ req: r.req ?? "auto", value: r.numThread ?? null, device: r.device, at: r.at, samples: r.samples })) : [], gpus: (await detectHardware()).gpus, physical: (await detectHardware()).physical, measured: measured && p && measured.baseUrl === p.baseUrl ? { value: measured.numThread ?? null, device: measured.device, at: measured.at, samples: measured.samples, model: measured.model } : null, effective: p ? tunedThreads(p.baseUrl) ?? null : null } };
 }
 // Busca (e guarda em cache) os metadados do modelo ativo; chamar antes de usar o perfil para que num_ctx fique estável entre as chamadas.
+// Mede o PC com o modelo ativo (inicialização, troca de IA, botão Testar desempenho). Pausa a indexação densa e o One page durante a medição,
+// senão o Ollama divide a CPU e os números saem errados.
+export const runTuning = (force = false, full = false, devices?: DeviceMode[]) => withQuestion(async () => autoTune(await tuneTarget(), { force, full, devices }));
 export const prepareModel = () => refreshModelInfo(activeProvider("chat"));
 
 // O Ollama recarrega o modelo quando num_ctx muda entre chamadas; todas as chamadas de chat usam o mesmo valor para evitar esse custo.

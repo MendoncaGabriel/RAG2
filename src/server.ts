@@ -5,9 +5,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { currentUser, login, logout, rateLimit } from "./auth.js";
 import { db, dbPath, uploadDir } from "./database.js";
-import { ask, chatContext, prepareReranker, tuneTarget, tuningOverview, uuid } from "./rag.js";
+import { ask, chatContext, prepareReranker, runTuning, tuningOverview, uuid } from "./rag.js";
 import { getAiTuning, setAiTuning, tuningLimits } from "./aisettings.js";
-import { autoTune } from "./tuning.js";
 import { activeSummary, autoConfigure, chat, createProvider, deleteProvider, getProvider, listModels, listProviders, ollamaStatus, setActive, testProvider, updateProvider } from "./ai.js";
 import { cancelOnePage, onePageFile, onePageJob, onePageStatus, startOnePage } from "./onepage.js";
 import { backfillRecords, documentMentions, duplicateOf, fileHash, fixMojibake, importFolder, importFolders, processDocument, recoverInterrupted, reindexDocument, removeDocument } from "./documents.js";
@@ -192,13 +191,14 @@ app.get("/api/ai/providers",(_req,res)=>res.json(listProviders()));
 app.post("/api/ai/providers",(req,res)=>{try{res.status(201).json(createProvider(req.body))}catch(e){aiError(res,e)}});
 app.put("/api/ai/providers/:id",(req,res)=>{try{const p=updateProvider(req.params.id,req.body);p?res.json(p):res.sendStatus(404)}catch(e){aiError(res,e)}});
 app.delete("/api/ai/providers/:id",(req,res)=>deleteProvider(req.params.id)?res.json({ok:true}):res.sendStatus(404));
-app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json(listProviders().active)}catch(e){aiError(res,e)}});
+app.put("/api/ai/active",(req,res)=>{try{setActive({chat:req.body?.chat,embedding:req.body?.embedding});void runTuning().catch(()=>{});res.json(listProviders().active)}catch(e){aiError(res,e)}});
 app.get("/api/ai/status",(_req,res)=>res.json(activeSummary()));
 // Ajustes de IA (contexto, resposta, trechos, threads): 0 = automático (perfil do modelo / medido neste PC), valor > 0 = manual.
 app.get("/api/ai/tuning",async(_req,res)=>{try{res.json({settings:getAiTuning(),limits:tuningLimits,...await tuningOverview()})}catch(e){aiError(res,e)}});
-app.put("/api/ai/tuning",async(req,res)=>{try{const settings=setAiTuning(req.body);void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json({settings,...await tuningOverview()})}catch(e){aiError(res,e)}});
+app.put("/api/ai/tuning",async(req,res)=>{try{const settings=setAiTuning(req.body);void runTuning().catch(()=>{});res.json({settings,...await tuningOverview()})}catch(e){aiError(res,e)}});
 // Configuração automática: procura o Ollama (localhost, IP do Windows visto pelo WSL2…), cadastra e escolhe modelos instalados.
-app.post("/api/ai/autoconfigure",async(_req,res)=>{try{const r=await autoConfigure();void tuneTarget().then(t=>autoTune(t)).catch(()=>{});res.json(r)}catch(e){aiError(res,e)}});
+app.post("/api/ai/benchmark",async(req,res)=>{try{void runTuning(true,req.body?.full===true,[req.body?.device==='all'?['cpu','gpu','auto']:req.body?.device].flat().filter((d:any)=>['cpu','gpu','auto'].includes(d)) as any).catch(()=>{});await new Promise(r=>setTimeout(r,300));res.status(202).json(await tuningOverview())}catch(e){aiError(res,e)}});
+app.post("/api/ai/autoconfigure",async(_req,res)=>{try{const r=await autoConfigure();void runTuning().catch(()=>{});res.json(r)}catch(e){aiError(res,e)}});
 app.post("/api/ai/providers/:id/test",async(req,res)=>{const p=getProvider(req.params.id);if(!p)return res.sendStatus(404);res.json(await testProvider(p))});
 // Lista modelos do provedor; sem chave informada, usa a do provedor já cadastrado (providerId).
 // A chave salva só é usada quando o endereço é o do próprio cadastro (nunca enviada a outro servidor).
@@ -233,5 +233,7 @@ async function startupChecks(){
   const every=Math.max(1,Number(process.env.SYNC_INTERVAL_MIN)||5)*60_000;
   setInterval(()=>{ if(needsSync())void reconcile().then(r=>console.info(`[Sync] periódica: ${r.ok?`retomados ${r.resumedDocuments.length}, exclusões ${r.deferredDeletions}`:`falhou (${r.error})`}`)); },every).unref();
 }
-// Antes de aceitar conexões: mede o PC e pré-carrega os modelos (tuning.ts). A medição só acontece na 1ª vez por PC/modelo.
-void tuneTarget().then(t=>autoTune(t)).catch(e=>console.warn("[Ajuste] falhou:",e)).finally(()=>app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`);void startupChecks().catch(e=>console.error("[Inicialização]",e));}));
+// Depois de abrir a porta (em segundo plano): mede o PC e pré-carrega os modelos (tuning.ts). A medição só acontece na 1ª vez por PC/modelo.
+app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`);void startupChecks().catch(e=>console.error("[Inicialização]",e));});
+// A medição pode levar minutos em CPUs lentas: roda em segundo plano, sem impedir o acesso à interface.
+void runTuning().catch(e=>console.warn("[Ajuste] falhou:",e));

@@ -3,6 +3,7 @@ import { db } from "./database.js";
 // Ajustes finos da IA, editados em Configurações (nada vem do .env). Cada número 0 = automático: o valor é derivado do modelo
 // ativo (modelprofile.ts) ou, nas threads, medido neste PC (tuning.ts). Valor > 0 = manual, vale para qualquer modelo.
 export type ThreadMode = "auto" | "manual" | "ollama";
+export type DeviceMode = "auto" | "cpu" | "gpu"; // onde o modelo de chat roda: o Ollama decide, só CPU (num_gpu 0) ou GPU com todas as camadas
 export interface AiTuning {
   contextTokens: number; // num_ctx do Ollama (0 = perfil do modelo; nunca passa do contexto nativo do modelo)
   maxTokens: number;     // teto de tokens da resposta, antes do ajuste Rápido/Detalhado (0 = perfil)
@@ -10,8 +11,9 @@ export interface AiTuning {
   topK: number;          // trechos recuperados por pergunta (0 = perfil)
   threadMode: ThreadMode; // auto = medido neste PC · manual = `threads` · ollama = o Ollama decide
   threads: number;
+  device: DeviceMode;
 }
-export const defaultTuning = (): AiTuning => ({ contextTokens: 0, maxTokens: 0, contextChars: 0, topK: 0, threadMode: "auto", threads: 0 });
+export const defaultTuning = (): AiTuning => ({ contextTokens: 0, maxTokens: 0, contextChars: 0, topK: 0, threadMode: "auto", threads: 0, device: "auto" });
 // Limites aceitos (0 sempre vale: automático).
 export const tuningLimits = { contextTokens: [2048, 1_048_576], maxTokens: [128, 32_768], contextChars: [2_000, 400_000], topK: [1, 12], threads: [1, 256] } as const;
 
@@ -31,6 +33,10 @@ function sanitize(input: any, base: AiTuning): AiTuning {
   if (input?.threadMode !== undefined) {
     if (!["auto", "manual", "ollama"].includes(input.threadMode)) throw new Error("Modo de threads inválido.");
     out.threadMode = input.threadMode;
+  }
+  if (input?.device !== undefined) {
+    if (!["auto", "cpu", "gpu"].includes(input.device)) throw new Error("Dispositivo inválido.");
+    out.device = input.device;
   }
   if (out.threadMode === "manual" && !out.threads) throw new Error("Informe o número de threads ou escolha Automático.");
   return out;

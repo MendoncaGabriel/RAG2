@@ -20,12 +20,14 @@ test("núcleos físicos do /proc/cpuinfo ignoram SMT e somam soquetes", () => {
   assert.equal(physicalFromCpuinfo("processor : 0\nmodel name : ARM\n"), undefined);
 });
 
-test("candidatas de threads: metade, 75%, núcleos − 1 e todos", () => {
-  assert.deepEqual(threadCandidates(8), [4, 6, 7, 8]);
-  assert.deepEqual(threadCandidates(10), [5, 8, 9, 10]);
-  assert.deepEqual(threadCandidates(4), [2, 3, 4]);
+test("candidatas de threads: 1, 2, 4, passos de 2 e o total", () => {
+  assert.deepEqual(threadCandidates(10), [1, 2, 4, 6, 8, 10]);
+  assert.deepEqual(threadCandidates(8), [1, 2, 4, 6, 8]);
+  assert.deepEqual(threadCandidates(4), [1, 2, 4]);
+  assert.deepEqual(threadCandidates(3), [1, 2, 3]);
   assert.deepEqual(threadCandidates(2), [1, 2]);
   assert.deepEqual(threadCandidates(1), [1]);
+  assert.deepEqual(threadCandidates(16), [1, 2, 4, 6, 8, 10, 12, 14, 16]);
 });
 
 test("escolha: menor tempo; empate técnico fica com menos threads", () => {

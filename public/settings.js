@@ -101,7 +101,7 @@ async function refreshModels() {
     if (!form.model.value.trim() && info.suggested[slot.models]) form.model.value = info.suggested[slot.models];
     renderChips();
     if (modelNames.length) fetchMsg(`✓ Ollama encontrado · ${modelNames.length} modelo(s) ${editingSlot === 'chat' ? 'de chat' : 'de embeddings'} instalado(s). Escolha um abaixo.`, 'ok');
-    else fetchMsg(`Ollama encontrado, mas sem modelo ${editingSlot === 'chat' ? 'de chat' : 'de embeddings'} instalado. No Windows, execute "ollama pull ${slot.pull}" e clique em Atualizar.`, 'error');
+    else fetchMsg(`Ollama encontrado, mas sem modelo ${editingSlot === 'chat' ? 'de chat' : 'de embeddings'} instalado. No computador do Ollama, execute "ollama pull ${slot.pull}" e clique em Atualizar.`, 'error');
   } catch (e) {
     if (seq !== fetchSeq) return;
     modelNames = []; renderChips();
@@ -217,25 +217,80 @@ function renderTuning() {
   const lim = t.limits;
   host.innerHTML = TUNE.map(f => row(f.label, f.help, { key: f.key, value: tuneModeOf(f.key) }, [['auto', `Automático (${nf(t.auto[f.key])})`], ['manual', 'Manual']], tuneDraft.values[f.key], lim[f.key][0], lim[f.key][1], f.unit,
     `Automático escolheria <b>${nf(t.auto[f.key])}</b> · em uso agora <b>${nf(t.effective[f.key])}</b> · aceita de ${nf(lim[f.key][0])} a ${nf(lim[f.key][1])}`)).join('')
-    + row('Threads de CPU do Ollama', 'Quantos núcleos o Ollama usa para ler o prompt e gerar. O automático mede o seu PC na primeira vez com cada modelo (leva de 20 s a 2 min).', { key: 'threads', value: tuneDraft.threadMode },
+    + row('Onde o modelo roda', 'Automático deixa o Ollama decidir. CPU força só o processador. GPU manda todas as camadas para a placa de vídeo (o Ollama precisa enxergá-la; em GPU integrada Intel/AMD ele a ignora por padrão: ative OLLAMA_IGPU_ENABLE=1 no serviço do Ollama). Use o teste de desempenho abaixo para comparar.', { key: 'device', value: tuneDraft.device },
+      [['auto', 'Automático (Ollama decide)'], ['cpu', 'CPU'], ['gpu', 'GPU']], null, 0, 0, '',
+      `GPU detectada neste PC: <b>${t.threads.gpus?.length ? esc(t.threads.gpus.join(', ')) : 'nenhuma'}</b>`)
+    + row('Threads de CPU do Ollama', 'Quantos núcleos o Ollama usa para ler o prompt e gerar. O automático mede o seu PC ao iniciar o sistema (e ao trocar de modelo) e usa a melhor; o resultado aparece abaixo.', { key: 'threads', value: tuneDraft.threadMode },
       [['auto', 'Automático (medido neste PC)'], ['manual', 'Manual'], ['ollama', 'Deixar o Ollama decidir']], tuneDraft.threads, lim.threads[0], lim.threads[1], 'threads',
       t.threads.measured ? `Medido neste PC: <b>${t.threads.measured.value ? nf(t.threads.measured.value) + ' threads' : 'o Ollama decide (modelo na GPU)'}</b> (${esc(t.threads.measured.device)}) · em uso agora <b>${t.threads.effective ? nf(t.threads.effective) : 'padrão do Ollama'}</b>` : 'Ainda não medido para o modelo atual · em uso agora: padrão do Ollama');
 }
 
+// ---------- Teste de desempenho (threads) ----------
+let benchTimer = null;
+const devName = d => (d === 'gpu' ? 'GPU' : d === 'cpu' ? 'CPU' : 'Automático (CPU + GPU, o Ollama decide)');
+const bestSec = r => Math.min(...r.samples.map(x => x.seconds));
+const where = d => (d === 'gpu' ? 'GPU' : d === 'misto' ? 'GPU e CPU' : 'CPU');
+// Nome claro de uma configuração medida: onde roda e, na CPU, quantas threads.
+function configLabel(r) {
+  if (r.req === 'cpu') return r.value ? `CPU com ${nf(r.value)} threads` : 'CPU';
+  if (r.req === 'gpu') return 'GPU';
+  return `Automático (roda na ${where(r.device)}${r.value ? `, ${nf(r.value)} threads` : ''})`;
+}
+function benchTable(rows, best) {
+  return `<table class="mt-2 w-full text-left text-xs"><thead class="text-ink-muted"><tr><th class="py-1 pr-4">Threads</th><th class="pr-4">Leitura do prompt</th><th class="pr-4">Geração</th><th>Resposta típica</th></tr></thead><tbody>${[...rows].sort((a, b) => a.threads - b.threads).map(x => { const hit = x.threads === best; return `<tr class="${hit ? 'font-semibold text-ok-ink' : 'text-heading'}"><td class="py-1 pr-4">${nf(x.threads)}${hit ? ' ✓' : ''}</td><td class="pr-4">${nf(x.promptTps)} tok/s</td><td class="pr-4">${nf(x.evalTps)} tok/s</td><td>≈ ${nf(x.seconds)} s</td></tr>`; }).join('')}</tbody></table>`;
+}
+function renderBench() {
+  const box = $('#benchBox'), th = tune?.threads, run = th?.run, set = tune?.settings;
+  if (!box) return;
+  $('#benchRun').disabled = $('#benchFull').disabled = !!run?.running || !tune?.model;
+  if (run?.running) {
+    const q = run.queue || [], at = Math.max(0, q.indexOf(run.device));
+    box.innerHTML = `<div class="rounded-lg border border-line p-4"><p class="font-medium text-heading">Testando ${esc(run.model)}… configuração ${nf(at + 1)} de ${nf(q.length || 1)}: <b>${esc(devName(run.device))}</b></p><p class="mt-1 text-xs text-ink-muted">${nf(run.samples.length)} de ${nf(run.planned || '?')} medições desta configuração. Não use o PC até terminar.</p></div>`;
+    clearTimeout(benchTimer);
+    benchTimer = setTimeout(async () => { try { tune = { ...tune, ...(await api('/api/ai/tuning')) }; } catch {} renderBench(); if (!tune.threads.run.running) renderTuning(); }, 3000);
+    return;
+  }
+  const res = (th?.results || []).filter(r => r.samples?.length).sort((a, b) => bestSec(a) - bestSec(b));
+  let html = run?.error ? `<p class="alert alert-error mb-3 text-sm">${esc(run.error)}</p>` : '';
+  if (!res.length) { box.innerHTML = html + '<p class="text-ink-muted">Ainda não medido para o modelo atual. Clique em "Descobrir a melhor configuração".</p>'; return; }
+  const inUse = r => set?.device === r.req && set?.threadMode === 'auto';
+  const useBtn = r => (inUse(r) ? '<span class="text-xs font-semibold text-ok-ink">✓ Em uso</span>' : `<button data-bench="${r.req}" class="btn btn-primary">Usar esta configuração</button>`);
+  const best = res[0], slow = res[res.length - 1], times = res.length > 1 ? bestSec(slow) / bestSec(best) : 1;
+  html += `<div class="rounded-lg border-2 border-ok-ink p-4"><p class="text-xs font-medium uppercase tracking-wide text-ok-ink">Melhor configuração para este PC</p>
+    <p class="mt-1 text-xl font-semibold text-heading">${esc(configLabel(best))}</p>
+    <p class="mt-1 text-sm text-ink-muted">Resposta típica em ≈ <b class="text-heading">${nf(bestSec(best))} s</b>${times >= 1.1 ? ` · <b class="text-heading">${nf(Math.round(times * 10) / 10)}× mais rápido</b> que ${esc(configLabel(slow))}` : ''}${best.req === 'cpu' && best.value ? `. Na CPU, use <b class="text-heading">${nf(best.value)} threads</b>.` : ''}</p>
+    <div class="mt-3">${useBtn(best)}</div></div>`;
+  if (res.length > 1) html += `<div class="mt-4 space-y-2"><p class="text-xs font-medium text-ink-muted">Todas as configurações testadas (da mais rápida para a mais lenta)</p>${res.map(r => `<div class="flex flex-wrap items-center gap-3 rounded-lg border border-line p-3"><div class="min-w-0 flex-1"><p class="text-heading">${esc(configLabel(r))}</p><div class="mt-1 h-2 overflow-hidden rounded bg-line"><div class="h-2 rounded bg-jabil-medium" style="width:${Math.max(6, Math.round(bestSec(best) / bestSec(r) * 100))}%"></div></div></div><span class="text-xs text-ink-muted">≈ ${nf(bestSec(r))} s</span>${r === best ? '' : useBtn(r)}</div>`).join('')}</div>`;
+  html += `<details class="mt-4"><summary class="cursor-pointer text-xs text-ink-muted">Ver todas as medições (threads, leitura do prompt, geração)</summary>${res.map(r => `<p class="mt-3 text-xs font-medium text-heading">${esc(configLabel(r))} <span class="font-normal text-ink-muted">· medido em ${esc(new Date(r.at).toLocaleString('pt-BR'))}</span></p>${benchTable(r.samples, r.value ?? r.samples[0]?.threads)}`).join('')}</details>`;
+  box.innerHTML = html;
+}
+$('#benchBox').addEventListener('click', async e => {
+  const req = e.target.closest("[data-bench]")?.dataset.bench;
+  if (!req) return;
+  e.target.disabled = true;
+  await saveTuning({ device: req, threadMode: 'auto', threads: 0 });
+});
+const startBench = full => async () => {
+  try { tune = { ...tune, ...(await api('/api/ai/benchmark', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ full, device: 'all' }) })) }; } catch (e) { $('#tuneError').textContent = e.message || String(e); $('#tuneError').classList.remove('hidden'); }
+  renderBench();
+};
+$('#benchRun').onclick = startBench(false);
+$('#benchFull').onclick = startBench(true);
 async function loadTuning() {
   try {
     tune = await api('/api/ai/tuning');
     const s = tune.settings;
-    tuneDraft = { manual: {}, values: {}, threadMode: s.threadMode, threads: s.threads || 0 };
+    tuneDraft = { manual: {}, values: {}, threadMode: s.threadMode, threads: s.threads || 0, device: s.device || 'auto' };
     for (const f of TUNE) { tuneDraft.manual[f.key] = s[f.key] > 0; tuneDraft.values[f.key] = s[f.key] > 0 ? s[f.key] : tune.auto[f.key]; }
     if (!tuneDraft.threads) tuneDraft.threads = tune.threads.measured?.value || tune.threads.effective || 4;
-    renderTuning(); $('#tuneError').classList.add('hidden');
+    renderTuning(); renderBench(); $('#tuneError').classList.add('hidden');
   } catch (e) { $('#tuneRows').innerHTML = `<p class="py-3 text-sm text-danger-ink">${esc(e.message)}</p>`; }
 }
 $('#tuneRows').addEventListener('change', e => {
   const key = e.target.dataset.mode;
   if (!key || !tune) return;
   if (key === 'threads') tuneDraft.threadMode = e.target.value;
+  else if (key === 'device') tuneDraft.device = e.target.value;
   else tuneDraft.manual[key] = e.target.value === 'manual';
   renderTuning();
 });
@@ -255,11 +310,11 @@ async function saveTuning(body) {
 }
 $('#tuneSave').onclick = () => {
   if (!tuneDraft) return;
-  const body = { threadMode: tuneDraft.threadMode, threads: tuneDraft.threadMode === 'manual' ? tuneDraft.threads : 0 };
+  const body = { device: tuneDraft.device, threadMode: tuneDraft.threadMode, threads: tuneDraft.threadMode === 'manual' ? tuneDraft.threads : 0 };
   for (const f of TUNE) body[f.key] = tuneDraft.manual[f.key] ? tuneDraft.values[f.key] : 0;
   saveTuning(body);
 };
-$('#tuneReset').onclick = () => saveTuning({ contextTokens: 0, maxTokens: 0, contextChars: 0, topK: 0, threads: 0, threadMode: 'auto' });
+$('#tuneReset').onclick = () => saveTuning({ contextTokens: 0, maxTokens: 0, contextChars: 0, topK: 0, threads: 0, threadMode: 'auto', device: 'auto' });
 
 lucide.createIcons();
 refreshAiStatus();

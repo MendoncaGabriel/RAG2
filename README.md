@@ -26,6 +26,8 @@ Tudo roda por Docker Compose no WSL2; o único serviço fora dos containers é o
 
    O Ollama continua escutando só em `127.0.0.1:11434`. O script cria um `portproxy` que escuta **apenas** no IP do Windows na interface virtual do WSL (ex.: `172.29.48.1`) e uma regra de firewall de entrada restrita a esse IP e à sub-rede do WSL — o Ollama não fica exposto ao Wi‑Fi/rede corporativa (não use `OLLAMA_HOST=0.0.0.0`). O script imprime a URL a usar em Configurações (ou use **Configurar automaticamente**). Se o WSL trocar de sub-rede (pode acontecer após reiniciar o Windows), rode o script de novo e atualize o `.env`; o app avisa no log e em `/healthz` quando não alcança o Ollama. `-Remove` desfaz a ponte.
 
+   **Linux nativo (Fedora, Ubuntu…):** o Ollama escuta só em `127.0.0.1`, que o container não alcança. Rode `sudo bash scripts/linux/ollama-docker-bridge.sh` (faz o Ollama escutar no IP do `docker0`, ex.: `172.17.0.1`, sem expô-lo à rede; `--remove` desfaz). O Compose já mapeia `host.docker.internal` para o host.
+
 2. **Configuração (no WSL2, na pasta do projeto):** `cp .env.example .env` e preencha `MASTER_PASSWORD`, `JWT_SECRET` (`openssl rand -hex 48`), e `QDRANT_API_KEY` (`openssl rand -hex 32`). **A IA não é configurada no `.env`:** depois de subir, abra **Configurações** na interface web e clique em **Configurar automaticamente** (ou cadastre o servidor manualmente; no WSL o IP do Windows sai de `ip route show default | awk '{print $3}'`).
 
 3. **Subir / parar:**

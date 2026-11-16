@@ -106,6 +106,9 @@ services:
         condition: service_healthy
     # backend: Qdrant (interna, sem saída) · egress: Ollama do Windows e downloads dos modelos de voz e do reranker.
     networks: [backend, egress]
+    # Linux nativo: host.docker.internal aponta para o host (no Docker Desktop/WSL já existe).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "${APP_BIND:-127.0.0.1}:${PORT:-3000}:3000"
     environment:

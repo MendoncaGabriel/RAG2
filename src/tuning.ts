@@ -1,4 +1,4 @@
-// Ajuste automático ao computador: roda na inicialização, antes do servidor aceitar conexões, e serve para qualquer PC.
+// Ajuste automático ao computador: roda na inicialização (em segundo plano, logo após abrir a porta) e serve para qualquer PC.
 // 1) Detecta CPU (núcleos físicos/lógicos), RAM e GPU.
 // 2) Mede no próprio PC, com o modelo de chat ativo, quantas threads deixam o Ollama mais rápido (leitura do prompt + geração)
 //    e guarda o resultado em APP_DATA_DIR/tuning.json (chave: hardware + servidor + versão do Ollama + modelo). "npm run tune" mede de novo.
@@ -16,12 +16,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { dataDir } from "./database.js";
 import { isReasoningOnly } from "./modelprofile.js";
-import { getAiTuning } from "./aisettings.js";
+import { getAiTuning, type DeviceMode } from "./aisettings.js";
 
 export interface Hardware { cpu: string; logical: number; physical: number; ramGB: number; freeGB: number; gpus: string[] }
 export interface TuneTarget { baseUrl: string; apiKey?: string; chatModel: string; contextTokens: number; embedding?: { baseUrl: string; apiKey?: string; model: string } }
 export type Sample = { threads: number; promptTps: number; evalTps: number; seconds: number };
-export interface TuneResult { key: string; at: string; baseUrl: string; model: string; numThread?: number; device: "cpu" | "gpu" | "misto"; samples: Sample[] }
+export interface TuneResult { req?: DeviceMode; key: string; at: string; baseUrl: string; model: string; numThread?: number; device: "cpu" | "gpu" | "misto"; samples: Sample[] }
 
 const exec = promisify(execFile);
 const cacheFile = () => path.join(dataDir, "tuning.json");
@@ -33,9 +33,22 @@ export function tunedThreads(baseUrl: string): number | undefined {
   const t = getAiTuning();
   if (t.threadMode === "manual" && t.threads > 0) return t.threads;
   if (t.threadMode === "ollama") return undefined;
-  return current && current.baseUrl === baseUrl ? current.numThread : undefined;
+  return current && current.baseUrl === baseUrl && (current.req ?? "auto") === t.device ? current.numThread : undefined;
 }
 export const tuningSummary = () => current;
+// Onde o chat roda, conforme Configurações. O mesmo valor em todas as chamadas (trocar num_gpu faz o Ollama recarregar o modelo).
+// "cpu" = num_gpu 0 · "gpu" = todas as camadas na GPU (o Ollama precisa enxergar a GPU: em GPUs integradas, OLLAMA_IGPU_ENABLE=1) · "auto" = Ollama decide.
+export const deviceOptions = (d: DeviceMode = getAiTuning().device): { num_gpu?: number } => d === "cpu" ? { num_gpu: 0 } : d === "gpu" ? { num_gpu: 999 } : {};
+// Resultados medidos para este modelo/servidor/PC, um por dispositivo pedido (cpu, gpu, auto).
+export function tuningResults(baseUrl: string, model: string): TuneResult[] {
+  return Object.values(readCache()).filter(r => r.baseUrl === baseUrl && r.model === model && sameMachine(r.key));
+}
+const sameMachine = (key: string) => { try { const k = JSON.parse(key), cur = machineKey; return !!cur && k[1] === cur[1] && k[2] === cur[2] && k[3] === cur[3]; } catch { return false; } };
+let machineKey: any[] | null = null;
+// Andamento da medição (para a tela Configurações acompanhar): amostras já medidas e quantas faltam, no mínimo.
+export interface TuneStatus { running: boolean; forced: boolean; device: DeviceMode; queue: DeviceMode[]; model: string; startedAt: string | null; planned: number; samples: Sample[]; error: string | null; finishedAt: string | null }
+let status: TuneStatus = { running: false, forced: false, device: "auto" as DeviceMode, queue: [] as DeviceMode[], model: "", startedAt: null, planned: 0, samples: [], error: null, finishedAt: null };
+export const tuningStatus = () => status;
 
 // ---------- Hardware ----------
 // Núcleos físicos no Linux: pares (physical id, core id) distintos de /proc/cpuinfo.
@@ -82,10 +95,13 @@ export async function detectHardware(): Promise<Hardware> {
 }
 
 // ---------- Escolha das threads ----------
-// Candidatas: metade, 75%, núcleos − 1 e todos os núcleos físicos (SMT/hyperthreading não ajuda o llama.cpp).
+// Candidatas da 1ª passada: 1, 2, 4 e passos de 2 até os núcleos físicos (sempre inclui o total). Em CPUs híbridas (P+E) o melhor valor costuma
+// ser BAIXO (medido num i5-1235U: 2–3 threads deram o dobro da geração de 8); depois a melhor é refinada com os vizinhos (±1).
 export function threadCandidates(physical: number): number[] {
-  const p = Math.max(1, Math.floor(physical));
-  return [...new Set([Math.ceil(p / 2), Math.round(p * 0.75), p - 1, p].filter(n => n >= 1))].sort((a, b) => a - b);
+  const p = Math.max(1, Math.floor(physical)), out = new Set<number>([1, 2, 4].filter(n => n <= p));
+  for (let n = 6; n < p; n += 2) out.add(n);
+  out.add(p);
+  return [...out].sort((a, b) => a - b);
 }
 // Tempo estimado de uma resposta típica do RAG: ≈1300 tokens de prompt (contexto recuperado) e ≈150 de resposta, como no benchmark.
 export const answerSeconds = (promptTps: number, evalTps: number) => 1300 / promptTps + 150 / evalTps;
@@ -118,9 +134,9 @@ function probeMessages() {
     { role: "user", content: `<contexto>\n${rows.join("\n")}\n</contexto>\n\nPergunta: liste os registros PRJ-100 a PRJ-115 com responsável, prazo e orçamento.` },
   ];
 }
-async function measure(t: TuneTarget, threads: number): Promise<Sample> {
+async function measure(t: TuneTarget, threads: number, req: DeviceMode): Promise<Sample> {
   const base = { model: t.chatModel, stream: false, keep_alive: "30m", ...(isReasoningOnly(t.chatModel) ? {} : { think: false }) };
-  const options = { num_ctx: t.contextTokens, num_thread: threads };
+  const options = { num_ctx: t.contextTokens, num_thread: threads, ...deviceOptions(req) };
   // 1ª chamada carrega o modelo com estas opções (trocar num_thread recarrega); a 2ª é a medida.
   await ollama(t.baseUrl, t.apiKey, "/api/chat", { ...base, messages: [{ role: "user", content: "OK" }], options: { ...options, num_predict: 1 } });
   const r = await ollama(t.baseUrl, t.apiKey, "/api/chat", { ...base, messages: probeMessages(), options: { ...options, temperature: 0, num_predict: 64 } });
@@ -134,28 +150,44 @@ function writeCache(r: TuneResult) {
   all[r.key] = r;
   try { fs.writeFileSync(cacheFile(), JSON.stringify(all, null, 2)); } catch (e) { console.warn("[Ajuste] não foi possível salvar o ajuste:", e instanceof Error ? e.message : e); }
 }
-export const tuneKey = (hw: Hardware, baseUrl: string, version: string, model: string) => JSON.stringify([hw.cpu, hw.physical, hw.logical, Math.round(hw.ramGB), baseUrl, version, model]);
+// O 1º item é a versão do método de medição: mudar as candidatas/critério invalida os ajustes salvos.
+export const tuneKey = (hw: Hardware, baseUrl: string, version: string, model: string, req: DeviceMode = "auto") => JSON.stringify([2, hw.cpu, hw.physical, hw.logical, Math.round(hw.ramGB), baseUrl, version, model, req]);
 
-async function sweep(t: TuneTarget, hw: Hardware, key: string, log: (m: string) => void): Promise<TuneResult> {
-  const samples: Sample[] = [];
+async function sweep(t: TuneTarget, hw: Hardware, key: string, log: (m: string) => void, full = false, req: DeviceMode = "auto", sameAs?: TuneResult): Promise<TuneResult> {
+  const samples: Sample[] = status.samples = [];
   const at = new Date().toISOString(), done = (numThread: number | undefined, device: TuneResult["device"]) => ({ key, at, baseUrl: t.baseUrl, model: t.chatModel, numThread, device, samples });
-  const candidates = threadCandidates(hw.physical);
-  log(`medindo ${t.chatModel} com ${candidates.join(", ")} threads (só na 1ª vez neste PC/modelo; leva de 20 s a 2 min)…`);
-  const one = async (n: number) => { const s = await measure(t, n); samples.push(s); log(`  ${String(n).padStart(2)} threads: prompt ${s.promptTps} tok/s · geração ${s.evalTps} tok/s · resposta típica ≈ ${s.seconds} s`); };
+  // Teste completo: de 1 thread até todas as threads lógicas do PC, sem pular nenhuma.
+  const candidates = full ? Array.from({ length: Math.max(1, hw.logical) }, (_, i) => i + 1) : threadCandidates(hw.physical);
+  status.planned = candidates.length;
+  log(`medindo ${t.chatModel} (${req === "gpu" ? "GPU" : req === "cpu" ? "CPU" : "dispositivo automático"}) com ${candidates.join(", ")} threads (só na 1ª vez neste PC/modelo; leva de 1 a ${full ? 15 : 6} min)…`);
+  const one = async (n: number) => { const s = await measure(t, n, req); samples.push(s); log(`  ${String(n).padStart(2)} threads: prompt ${s.promptTps} tok/s · geração ${s.evalTps} tok/s · resposta típica ≈ ${s.seconds} s`); };
   // Começa pelo total de núcleos: se o modelo ficou inteiro na GPU, as threads não importam e o resto da varredura é dispensado.
   await one(candidates[candidates.length - 1]);
   const device = deviceOf((await loaded(t.baseUrl, t.apiKey)).find(m => m.name === withTag(t.chatModel))) || "cpu";
+  if (req === "gpu" && device === "cpu") throw new Error("O Ollama não usou a GPU. Em GPU integrada (Intel/AMD) ative OLLAMA_IGPU_ENABLE=1 (e OLLAMA_VULKAN=1) no serviço do Ollama e reinicie-o; confira com `ollama ps`.");
+  // "Automático" que caiu na CPU é a mesma configuração do teste de CPU: reaproveita as medidas em vez de repetir minutos de teste.
+  if (req === "auto" && device === "cpu" && sameAs) return { ...sameAs, req, key, at, samples: sameAs.samples };
   if (device === "gpu") return done(undefined, "gpu");
-  for (const n of candidates.slice(0, -1).reverse()) await one(n);
+  for (const n of candidates.slice(0, -1)) await one(n);
   // Refina em volta da melhor (±1) quando o vizinho não foi medido.
   const best = pickThreads(samples)!;
-  for (const n of [best - 1, best + 1]) if (n >= 1 && n <= hw.physical && !samples.some(s => s.threads === n)) await one(n);
+  if (!full) for (const n of [best - 1, best + 1]) if (n >= 1 && n <= hw.physical && !samples.some(s => s.threads === n)) { status.planned++; await one(n); }
   return done(pickThreads(samples), device);
 }
 
 const isLocal = (url: string) => /^https?:\/\/(localhost|127\.|\[?::1\]?|0\.0\.0\.0|host\.docker\.internal)/i.test(url);
 
-export async function autoTune(t: TuneTarget | null, opts: { force?: boolean; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
+// Uma medição por vez: chamadas simultâneas (inicialização, salvar ajustes, configuração automática, botão de teste) esperam a que já está rodando.
+// Medições paralelas travavam o Ollama (fila de chat + embeddings sem resposta, indexação sem andar).
+let tuning: Promise<TuneResult | null> | null = null;
+export function autoTune(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
+  if (tuning) return tuning;
+  status = { running: true, forced: !!opts.force || !!opts.full, device: opts.devices?.[0] ?? getAiTuning().device, queue: opts.devices?.length ? opts.devices : [getAiTuning().device], model: t?.chatModel || "", startedAt: new Date().toISOString(), planned: 0, samples: [], error: null, finishedAt: null };
+  return tuning = autoTuneNow(t, opts)
+    .catch(e => { status.error = e instanceof Error ? e.message : String(e); throw e; })
+    .finally(() => { status.running = false; status.finishedAt = new Date().toISOString(); tuning = null; });
+}
+async function autoTuneNow(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
   const log = opts.log || ((m: string) => console.info(`[Ajuste] ${m}`));
   const t0 = Date.now();
   const hw = await detectHardware();
@@ -165,20 +197,32 @@ export async function autoTune(t: TuneTarget | null, opts: { force?: boolean; lo
   try { version = String((await ollama(t.baseUrl, t.apiKey, "/api/version", undefined, 5_000)).version || ""); }
   catch { log(`Ollama indisponível em ${t.baseUrl}: ajuste adiado para a próxima inicialização (padrão do Ollama até lá).`); return null; }
 
-  const mode = getAiTuning().threadMode;
-  const key = tuneKey(hw, t.baseUrl, version, t.chatModel), cached = readCache()[key];
-  try {
-    if (mode === "ollama") log("threads: o Ollama decide (Configurações); medição desligada.");
-    else if (mode === "manual") log(`threads: ${getAiTuning().threads} (manual, Configurações); sem medir.`);
-    else if (cached && !opts.force) { current = cached; log(`usando ajuste salvo de ${cached.at.slice(0, 10)}: ${cached.numThread ? `${cached.numThread} threads` : "threads automáticas do Ollama"} (${cached.device}). Para medir de novo: npm run tune.`); }
-    else { current = await sweep(t, hw, key, log); writeCache(current); log(`escolhido: ${current.numThread ? `${current.numThread} threads` : `threads automáticas (modelo na ${current.device === "gpu" ? "GPU" : "CPU"})`}.`); }
-  } catch (e) { log(`medição falhou (${e instanceof Error ? e.message : e}); seguindo com o padrão do Ollama.`); }
+  const mode = getAiTuning().threadMode, inUse = getAiTuning().device;
+  machineKey = JSON.parse(tuneKey(hw, t.baseUrl, version, t.chatModel));
+  const devices = opts.devices?.length ? opts.devices : [inUse];
+  const doneNow: Partial<Record<DeviceMode, TuneResult>> = {};
+  for (const req of devices) {
+    status.device = req;
+    const key = tuneKey(hw, t.baseUrl, version, t.chatModel, req), cached = readCache()[key], label = req === "gpu" ? "GPU" : req === "cpu" ? "CPU" : "automático";
+    try {
+      if (mode === "ollama" && !opts.force) log("threads: o Ollama decide (Configurações); medição desligada.");
+      else if (mode === "manual" && !opts.force) log(`threads: ${getAiTuning().threads} (manual, Configurações); sem medir.`);
+      else if (cached && !opts.force && !opts.full) { if (req === inUse) current = cached; log(`usando ajuste salvo de ${cached.at.slice(0, 10)} (${label}): ${cached.numThread ? `${cached.numThread} threads` : "threads automáticas do Ollama"} (${cached.device}). Para medir de novo use "Testar desempenho" em Configurações.`); }
+      else {
+        const res = await sweep(t, hw, key, log, opts.full, req, doneNow.cpu);
+        doneNow[req] = res;
+        writeCache(res);
+        if (req === inUse) current = res;
+        log(`escolhido (${label}): ${res.numThread ? `${res.numThread} threads` : `threads automáticas (modelo na ${res.device === "gpu" ? "GPU" : "CPU"})`}`);
+      }
+    } catch (e) { status.error = e instanceof Error ? e.message : String(e); log(`medição ${label} falhou (${status.error}); seguindo com o padrão do Ollama.`); }
+  }
 
   // Pré-carga com as opções reais das perguntas: embeddings primeiro e chat por último (a ordem de uso de cada pergunta).
   const threads = tunedThreads(t.baseUrl);
   try {
-    if (t.embedding?.model) { const th = tunedThreads(t.embedding.baseUrl); await ollama(t.embedding.baseUrl, t.embedding.apiKey, "/api/embed", { model: t.embedding.model, input: ["aquecimento"], keep_alive: "30m", ...(th ? { options: { num_thread: th } } : {}) }, 120_000); }
-    await ollama(t.baseUrl, t.apiKey, "/api/chat", { model: t.chatModel, stream: false, keep_alive: "30m", ...(isReasoningOnly(t.chatModel) ? {} : { think: false }), messages: [{ role: "user", content: "OK" }], options: { num_ctx: t.contextTokens, num_predict: 1, ...(threads ? { num_thread: threads } : {}) } });
+    if (t.embedding?.model) { const th = tunedThreads(t.embedding.baseUrl); await ollama(t.embedding.baseUrl, t.embedding.apiKey, "/api/embed", { model: t.embedding.model, input: ["aquecimento"], keep_alive: "30m", options: { ...(th ? { num_thread: th } : {}), ...deviceOptions() } }, 120_000); }
+    await ollama(t.baseUrl, t.apiKey, "/api/chat", { model: t.chatModel, stream: false, keep_alive: "30m", ...(isReasoningOnly(t.chatModel) ? {} : { think: false }), messages: [{ role: "user", content: "OK" }], options: { num_ctx: t.contextTokens, num_predict: 1, ...(threads ? { num_thread: threads } : {}), ...deviceOptions() } });
     const models = await loaded(t.baseUrl, t.apiKey), chatModel = models.find(m => m.name === withTag(t.chatModel)), device = deviceOf(chatModel);
     log(`modelos prontos em ${((Date.now() - t0) / 1000).toFixed(1)} s · ${t.chatModel} na ${device === "gpu" ? "GPU" : device === "misto" ? "GPU+CPU" : "CPU"} · num_ctx ${t.contextTokens}${threads ? ` · ${threads} threads` : ""}`);
     if (device === "cpu" && isLocal(t.baseUrl) && hw.gpus.length) {

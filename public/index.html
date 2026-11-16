@@ -205,7 +205,7 @@
     <section class="card mb-6 p-4 sm:p-6">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0 flex-1"><div class="flex items-center gap-2"><i data-lucide="zap" class="h-4 w-4 text-jabil-medium"></i><h2 class="text-lg font-semibold text-heading">Configuração automática</h2></div>
-        <p class="mt-1 text-sm text-ink-muted">Procura o Ollama neste computador, escolhe entre os modelos já instalados e deixa em uso o que ainda estiver sem escolha. Depois você pode trocar tudo manualmente abaixo.</p></div>
+        <p class="mt-1 text-sm text-ink-muted">Procura o Ollama neste computador (Linux, ou Windows via WSL2), escolhe entre os modelos já instalados e deixa em uso o que ainda estiver sem escolha. Depois você pode trocar tudo manualmente abaixo.</p></div>
         <button id="autoConfig" class="btn btn-primary"><i data-lucide="zap" class="h-4 w-4"></i>Configurar automaticamente</button>
       </div>
       <p id="autoMsg" class="alert mt-4 hidden text-sm"></p>
@@ -233,6 +233,13 @@
       <p class="text-sm text-ink-muted">No <b>Automático</b> o sistema escolhe pelo tamanho e pelo contexto do modelo de chat em uso e mede as threads neste computador. Escolha <b>Manual</b> para fixar um valor; ele vale para qualquer modelo (o contexto nunca passa do que o modelo suporta).</p>
       <p id="tuneModel" class="mt-2 text-xs text-ink-muted"></p>
       <div id="tuneRows" class="mt-4 divide-y divide-line"></div>
+      <div class="mt-2 border-t border-line pt-4">
+        <div class="flex flex-wrap items-center gap-2"><i data-lucide="gauge" class="h-4 w-4 text-jabil-medium"></i><h3 class="font-medium text-heading">Qual a melhor configuração para a IA?</h3></div>
+        <p class="mt-1 text-xs text-ink-muted">O teste mede o modelo de chat em uso na <b>CPU</b>, na <b>GPU</b> e no <b>Automático</b> (o Ollama divide como achar melhor) e diz qual é mais rápido e quantas threads usar. Leva alguns minutos; durante o teste a indexação pausa e o PC fica ocupado, então evite usá-lo.</p>
+        <div class="mt-3 flex flex-wrap gap-2"><button id="benchRun" class="btn btn-primary">Descobrir a melhor configuração</button><button id="benchFull" class="btn btn-secondary" title="Testa cada número de threads, de 1 até o máximo do PC (até 15 min por configuração)">Teste completo</button></div>
+        <div id="benchBox" class="mt-4 text-sm"></div>
+      </div>
+      </div>
       <p id="tuneError" class="alert alert-error mt-4 hidden text-sm"></p>
       <div class="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end"><button id="tuneReset" class="btn btn-secondary">Tudo automático</button><button id="tuneSave" class="btn btn-primary">Salvar ajustes</button></div>
     </section>
