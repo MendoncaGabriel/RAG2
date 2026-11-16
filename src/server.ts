@@ -168,7 +168,7 @@ app.post("/api/conversations/:id/messages",async(req,res)=>{
     db.prepare("INSERT INTO messages(id,conversation_id,role,content) VALUES(?,?,?,?)").run(userId,conversation.id,"user",question);
     if(stream){res.status(200).set({"content-type":"application/x-ndjson; charset=utf-8","cache-control":"no-cache","x-accel-buffering":"no"});res.flushHeaders();send({type:"user",id:userId});}
     const mention=documentMentions(conversation.notebook_id,question),focusIds=Array.isArray(req.body?.documentIds)?req.body.documentIds.slice(0,500).map(String):[],documentIds=[...new Set([...focusIds,...mention.ids])];
-    const result=await ask(conversation.notebook_id,mention.text,{signal:abort.signal,history,detailed:req.body?.detailed===true,creative:req.body?.creative===true,conversational:req.body?.conversational===true,documentIds:documentIds.length?documentIds:undefined,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:(sources,stats)=>send({type:"sources",sources,stats})});
+    const result=await ask(conversation.notebook_id,mention.text,{signal:abort.signal,history,detailed:req.body?.detailed===true,creative:req.body?.creative===true,conversational:req.body?.conversational===true,spoken:req.body?.spoken===true,documentIds:documentIds.length?documentIds:undefined,onToken:token=>{const t=Date.now();if(!chunks++)firstAt=t;lastAt=t;send({type:"token",token})},onSources:(sources,stats)=>send({type:"sources",sources,stats})});
     const id=uuid();
     const durationMs=Date.now()-started;
     // Aproximação: cada pedaço de streaming ≈ 1 token; respostas determinísticas (1 pedaço) não têm taxa.

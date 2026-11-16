@@ -28,6 +28,8 @@ export type HistoryMessage = { role: string; content: string };
 // entraram no prompt depois do ranqueamento (reranking + corte de relevância + orçamento de contexto).
 export type RetrievalStats = { found: number; used: number; reranked: boolean };
 export type AskOptions = { history?: HistoryMessage[]; onToken?: (token: string) => void; onSources?: (sources: any[], stats?: RetrievalStats) => void; signal?: AbortSignal; detailed?: boolean; creative?: boolean; conversational?: boolean;
+  // Modo de voz: a resposta vai para o sintetizador (texto corrido, simples de ouvir; spokenRule).
+  spoken?: boolean;
   // Só a recuperação (benchmark): devolve depois de onSources, sem gerar a resposta.
   retrievalOnly?: boolean;
   // Perguntar só a estes documentos do notebook (escolhidos na interface); vazio = todos.
@@ -472,6 +474,23 @@ export function samplingFor(profile: { temperature: number; topP: number; topKSa
   return { temperature, topP: Math.max(profile.topP, 0.92), topK: Math.max(profile.topKSampling, 50) };
 }
 
+// Modo de voz: a resposta é lida pelo sintetizador (Piper pt-BR), não vista na tela. Markdown, tabelas e emojis o speechText
+// (voice.ts) ainda limpa depois, mas o conteúdo precisa nascer falável: texto corrido em frases curtas, sem jargão, sem ditar
+// códigos, caminhos ou links, e com palavras em português no lugar de termos em inglês (a voz pt-BR lê inglês com regras do
+// português: "download" vira "dov-nlo-adi"; os que restam passam pela grafia de pronúncia de voice.ts, `pronouncePt`).
+// Códigos e números pedidos continuam exatos: a regra só tira o que ninguém pediu.
+export function spokenRule(compact: boolean): string {
+  if (compact) return "A resposta será lida em voz alta: escreva em texto corrido, com frases curtas e palavras simples, sem listas, tabelas, símbolos ou parênteses. Explique siglas e jargão, não leia códigos longos nem links que não foram pedidos e prefira palavras em português a termos em inglês.";
+  return [
+    "A resposta será lida em voz alta por um sintetizador de voz: escreva para ser ouvida, como alguém explicando de viva voz.",
+    "- Texto corrido em frases curtas e completas; nada de listas, tópicos, tabelas, títulos, negrito, emojis, links, símbolos ou parênteses.",
+    "- Linguagem simples: troque jargão técnico por palavras do dia a dia; se uma sigla ou termo técnico for indispensável, explique-o em poucas palavras.",
+    "- Não dite códigos longos, caminhos de arquivo, comandos, fórmulas ou endereços, a não ser que a pergunta peça exatamente isso; diga o que eles significam.",
+    "- Vários itens viram uma frase (\"são três: A, B e C\"); se forem muitos, diga quantos são e cite os principais. Não despeje muitos números seguidos: diga os que respondem à pergunta, com o valor exato.",
+    "- Prefira palavras em português a termos em inglês (baixar em vez de download, reunião em vez de meeting, prazo em vez de deadline, atualização em vez de update); mantenha o inglês só em nomes próprios e termos sem equivalente.",
+  ].join("\n");
+}
+
 // Modo "Conversa": a IA explica, troca ideias e dialoga sobre o assunto. Os documentos continuam sendo a base e a fonte dos
 // fatos específicos (códigos, valores, datas, nomes), mas ela pode usar conhecimento geral para explicar conceitos, dar
 // analogias e exemplos, dizendo quando algo não vem dos documentos. Sem trecho encontrado, conversa em vez de recusar.
@@ -529,7 +548,7 @@ export function buildSystemPrompt(tier: string): string {
 // trata o notebook (nome e documentos) para oferecer ajuda, mas não recebe conteúdo dele e não pode afirmar nada sobre ele.
 // searched: a mensagem tinha assunto, mas a busca estrita não achou trecho ("que horas são?", "me conta uma piada" ou algo que
 // os documentos não cobrem): conversa normalmente e, se pediram algo dos documentos, diz que não encontrou.
-export function buildDirectPrompt(notebook: string, documents: string[], searched = false): string {
+export function buildDirectPrompt(notebook: string, documents: string[], searched = false, spoken = false): string {
   const about = documents.length ? `Você é o assistente do notebook${notebook ? ` "${notebook}"` : ""}, que reúne estes documentos: ${documents.join("; ")}.` : `Você é o assistente do notebook${notebook ? ` "${notebook}"` : ""}.`;
   return [
     `Você conversa em português com o usuário de forma natural, simpática e ${searched ? "direta" : "breve (1 a 3 frases)"}, como numa conversa falada.`,
@@ -539,6 +558,7 @@ export function buildDirectPrompt(notebook: string, documents: string[], searche
     `${about} Você ajuda a entender e explorar esse material; quando fizer sentido, ofereça ajuda com ele.`,
     `Nunca invente fatos, números, nomes ou conteúdo dos documentos.${searched ? "" : " Se pedirem algo específico deles, peça que perguntem sobre o assunto para você consultar."}`,
     "Não repita apresentações nem cumprimentos já feitos na conversa e não cite fontes ou trechos.",
+    ...(spoken ? [spokenRule(true)] : []),
   ].join("\n");
 }
 async function directReply(notebookId: string, question: string, history: HistoryMessage[], options: AskOptions, reason: string, searched = false) {
@@ -552,7 +572,7 @@ async function directReply(notebookId: string, question: string, history: Histor
   const raw = await chat({
     ...samplingFor(profile, true), repeatPenalty: profile.repeatPenalty, signal: options.signal,
     contextSize: profile.contextTokens, maxTokens: (options.detailed ? 400 : 200) * (searched ? 1.5 : 1),
-    messages: [{ role: "system", content: buildDirectPrompt(notebook, documents, searched) }, ...turns, { role: "user", content: question }],
+    messages: [{ role: "system", content: buildDirectPrompt(notebook, documents, searched, !!options.spoken) }, ...turns, { role: "user", content: question }],
   }, token => { if (!firstToken) firstToken = Date.now(); options.onToken?.(token); });
   console.info(`[RAG] conversa direta, sem trechos (${reason}) · 1º token ${firstToken ? firstToken - t0 : "-"}ms · total ${Date.now() - t0}ms`);
   return { answer: (raw || "O modelo não retornou resposta.").replace(/[ \t]{2,}/g, " ").trim(), sources: [] };
@@ -598,7 +618,7 @@ async function askNow(notebookId: string, question: string, options: AskOptions 
   // Modo detalhado (botão ao lado de Enviar): mesmo contexto do rápido (o início da resposta não atrasa); muda o teto de saída
   // e a preferência de estilo (mais elaborada), sem impor tamanho.
   // num_ctx não muda entre os modos (evita recarregar o modelo no Ollama).
-  const detailed = !!options.detailed, conversational = !!options.conversational;
+  const detailed = !!options.detailed, conversational = !!options.conversational, spoken = !!options.spoken;
   // Modo conversa (chat com "Conversa" ligado ou voz): a IA decide se a mensagem precisa dos documentos. Só fora dele o RAG é sempre usado.
   const route = conversational && process.env.CONVERSATION_ROUTING !== "false" ? conversationRoute(question, history) : null;
   if (route?.kind === "direct") return directReply(notebookId, question, history, options, "conversa");
@@ -702,7 +722,7 @@ async function askNow(notebookId: string, question: string, options: AskOptions 
 
   // ---------- Prompt dentro do contexto do modelo ----------
   // Instruções, histórico, pergunta e o teto da resposta vêm primeiro; os trechos ocupam só o espaço que sobra.
-  const systemPrompt = conversational ? buildConversationPrompt(profile.tier) : buildSystemPrompt(profile.tier);
+  const systemPrompt = `${conversational ? buildConversationPrompt(profile.tier) : buildSystemPrompt(profile.tier)}${spoken ? `\n\n${spokenRule(compact)}` : ""}`;
   // Não há mais "verificação de escopo" com uma segunda chamada SIM/NAO: em modelos de 1–4B ela dava falso NAO com o contexto
   // certo em mãos (a aplicação descartava os trechos e respondia no lugar da IA) e processava o contexto inteiro duas vezes.
   // Quem decide se responde é o próprio modelo, com a regra de recusa do prompt de sistema.
@@ -712,7 +732,11 @@ async function askNow(notebookId: string, question: string, options: AskOptions 
   const turns = !conversational && (compact || followUp.mode === "none") ? [] : trimHistory(usefulHistory(history)).map(m => ({ role: (m.role === "user" ? "user" : "assistant") as "user" | "assistant", content: m.content }));
   // Estilo por modo: só uma preferência, não regra de tamanho. O teto de tokens (maxTokens) é o único limite;
   // dentro dele o modelo decide o quanto escrever conforme a pergunta.
-  const style = conversational
+  // Voz: a preferência de tamanho vale para ouvir (uma lista de 10 itens lida em voz alta cansa), e o lembrete de texto falável
+  // fica no fim da mensagem, onde os modelos pequenos mais obedecem.
+  const style = spoken
+    ? `${detailed ? "Pode explicar mais, em poucos parágrafos curtos." : conversational ? "Resposta CURTA, como numa conversa falada: de 2 a 4 frases, só o essencial. Se o assunto for grande, ofereça aprofundar no final." : "Resposta curta para ouvir: de 1 a 3 frases com o essencial, cobrindo todas as partes da pergunta."} Será lida em voz alta: texto corrido, frases curtas, palavras simples e em português, sem listas nem símbolos.`
+    : conversational
     // Rápido na conversa = resposta curta de bate-papo (medido: "em poucos parágrafos" saía do mesmo tamanho do detalhado).
     ? detailed ? "Explique com calma e profundidade, em vários parágrafos, com exemplos; converse de forma natural." : "Resposta CURTA, como numa conversa falada: de 2 a 4 frases, só o essencial. Se o assunto for grande, ofereça aprofundar no final."
     : detailed

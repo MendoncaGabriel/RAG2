@@ -13,7 +13,7 @@ export const voiceDir = path.resolve(process.env.VOICE_DIR || path.join(dataDir,
 const enabled = process.env.VOICE_ENABLED !== "false";
 const hfUrl = (process.env.VOICE_HF_URL || "https://huggingface.co").replace(/\/+$/, "");
 const threads = Math.max(1, Number(process.env.VOICE_NUM_THREADS) || 4);
-const whisperLanguage = process.env.VOICE_STT_LANGUAGE ?? "pt";
+const whisperLanguage = /^(auto|)$/i.test(process.env.VOICE_STT_LANGUAGE ?? "pt") ? "" : String(process.env.VOICE_STT_LANGUAGE); // "auto" = o Whisper detecta (pt/en misturados)
 
 type Asset = { key: string; repo: string; dir: string; filter: RegExp; mb: number };
 type SttModel = Asset & { label: string; config: (dir: string) => object };
@@ -167,6 +167,51 @@ export function fixCodes(text: string, codes: string[]) {
   }
   return out.join(" ");
 }
+// ---------- Nomes próprios do notebook na fala ----------
+// O STT multilíngue escreve "Alfa" como "Alpha" e "Metrologia" como "Metrology" (ou o inverso, em frase em inglês).
+// Nomes do notebook (sequências de palavras capitalizadas) são recuperados pela chave fonética, de forma conservadora:
+// nome de uma palavra só casa se a chave for idêntica; de 2+ palavras aceita 1 letra de diferença (chave longa).
+const phon = (s: string) => plain(s).replace(/ph/g, "f").replace(/qu/g, "c").replace(/[kq]/g, "c").replace(/y/g, "i").replace(/w/g, "v").replace(/z/g, "s").replace(/h/g, "").replace(/(.)\1+/g, "$1");
+export function extractTerms(contents: Iterable<string>, limit = 400) {
+  const run = /(?<![\p{L}\p{N}])\p{Lu}\p{Ll}{2,}(?:\s+(?:d[aeo]s?\s+)?\p{Lu}\p{Ll}{2,}){0,3}/gu, freq = new Map<string, { all: number; mid: number }>();
+  const add = (t: string, mid: boolean) => { const e = freq.get(t) ?? { all: 0, mid: 0 }; e.all++; if (mid) e.mid++; freq.set(t, e); };
+  for (const text of contents) for (const m of text.matchAll(run)) {
+    // Uma frase que começa com palavra comum ("Depois Bianca Reis") gera o nome inteiro e também as partes: só o que se repete vale.
+    const w = m[0].split(/\s+/), starts = /(^|[.!?:|#*>\n-]\s*)$/.test(text.slice(Math.max(0, m.index - 4), m.index));
+    const cap = (i: number) => /^\p{Lu}/u.test(w[i]);
+    for (let i = 0; i < w.length; i++) if (cap(i)) {
+      add(w[i], !starts); // sequência que abre a frase: não dá para saber se a 1ª palavra é só o começo da frase
+      for (let j = i + 1; j < w.length && j - i <= 4; j++) if (cap(j) && j - i >= 1) add(w.slice(i, j + 1).join(" "), true);
+    }
+  }
+  return [...freq].filter(([t, e]) => t.includes(" ") ? e.all >= 2 : t.length >= 6 && e.mid >= 2).sort((a, b) => b[1].all - a[1].all).slice(0, limit).map(([t]) => t);
+}
+export function fixTerms(text: string, terms: string[]) {
+  const vocab = terms.map(t => ({ t, n: t.split(" ").length, plain: plain(t), key: phon(t) })).filter(v => v.key.length >= 5);
+  if (!vocab.length) return text;
+  const words = text.split(/\s+/).filter(Boolean), out: string[] = [];
+  for (let i = 0; i < words.length;) {
+    let hit: { t: string; n: number } | null = null;
+    for (let n = Math.min(3, words.length - i); n >= 1 && !hit; n--) {
+      const span = words.slice(i, i + n); if (span.slice(0, -1).some(w => /[.,;:!?…]$/.test(w)) || span.some(w => w.includes("-"))) continue;
+      const key = phon(span.join("")), raw = plain(span.join(""));
+      if (!key) continue;
+      const v = vocab.find(v => v.n === n && v.plain !== raw && (v.key === key || (n >= 2 && v.key.length >= 10 && v.key[0] === key[0] && lev1(key, v.key))));
+      if (v) hit = { t: v.t, n };
+    }
+    if (hit) { out.push(hit.t + (words[i + hit.n - 1].match(/[.,;:!?…]+$/)?.[0] || "")); i += hit.n; } else out.push(words[i++]);
+  }
+  return out.join(" ");
+}
+const termCache = new Map<string, { count: number; terms: string[] }>();
+function notebookTerms(notebookId: string) {
+  const count = (db.prepare("SELECT count(*) AS n FROM chunks WHERE notebook_id=?").get(notebookId) as { n: number }).n;
+  const hit = termCache.get(notebookId);
+  if (hit && hit.count === count) return hit.terms;
+  const terms = extractTerms((function* () { for (const r of db.prepare("SELECT content FROM chunks WHERE notebook_id=?").iterate(notebookId) as Iterable<{ content: string }>) yield r.content; })());
+  termCache.set(notebookId, { count, terms });
+  return terms;
+}
 const codeCache = new Map<string, { count: number; codes: string[] }>();
 function notebookCodes(notebookId: string) {
   const count = (db.prepare("SELECT count(*) AS n FROM chunks WHERE notebook_id=?").get(notebookId) as { n: number }).n;
@@ -191,7 +236,9 @@ export function speechText(text: string) {
     .replace(/^\s{0,3}#{1,6}\s+/gm, "").replace(/^\s*>\s?/gm, "").replace(/^\s*[-*+•]\s+/gm, "").replace(/^\s*(\d+)[.)]\s+/gm, "$1, ")
     .replace(/(\*\*|__|~~|`)/g, "").replace(/(?<![\p{L}\p{N}])[*_]+|[*_]+(?![\p{L}\p{N}])/gu, "")
     .replace(/<\/?[a-z][^>]*>/gi, " ").replace(/[\p{Extended_Pictographic}\u{FE0F}\u{200D}]/gu, "")
-    .replace(/\s+/g, " ").replace(/(\s*,\s*){2,}/g, ", ").replace(/^[\s,;:]+|[\s,;]+$/g, "").trim();
+    // Parênteses viram pausa ("o prazo (30 dias) vale" -> "o prazo, 30 dias, vale"); marcador de gênero/plural "aluno(a)" some.
+    .replace(/(\p{L})\((?:a|as|o|os|s|es)\)/gu, "$1").replace(/\s*\(([^()]*)\)/g, ", $1, ").replace(/[()]/g, " ")
+    .replace(/\s+/g, " ").replace(/(\s*,\s*){2,}/g, ", ").replace(/\s*,\s*([.!?;:])/g, "$1").replace(/^[\s,;:]+|[\s,;]+$/g, "").trim();
 }
 // Números, moeda, datas e unidades em pt-BR: o espeak-ng lê mal "R$ 1.250.000,50", "01/03/2024" ou "14h30".
 export function normalizePt(text: string) {
@@ -213,7 +260,57 @@ export function normalizePt(text: string) {
     .replace(/(\d)\s?m²/g, "$1 metros quadrados").replace(/(\d)\s?m³/g, "$1 metros cúbicos")
     .replace(/\bn[º°.]\s?(?=\d)/gi, "número ").replace(/\b(\d+)\s?[-–]\s?(\d+)\b/g, "$1 a $2")
     .replace(/\b([A-Z0-9]{2,})[-_]([A-Z0-9]{2,})\b/g, "$1 $2").replace(/\be\/ou\b/gi, "e ou").replace(/(\p{L})\/(\p{L})/gu, "$1 ou $2")
-    .replace(/\bvs\.?(?=\s)/gi, "versus").replace(/\betc\./gi, "etcétera.");
+    .replace(/\bvs\.?(?=\s)/gi, "versus").replace(/\betc\./gi, "etcétera.")
+    // Símbolos e abreviações que a voz pula ou soletra.
+    .replace(/(\d)\s?°\s?C\b/g, "$1 graus Celsius").replace(/(\d)\s?°/g, "$1 graus").replace(/(\d)\s?[x×]\s?(\d)/g, "$1 por $2")
+    .replace(/\s*(?:≥|>=)\s*/g, " maior ou igual a ").replace(/\s*(?:≤|<=)\s*/g, " menor ou igual a ").replace(/\s*±\s*/g, " mais ou menos ")
+    .replace(/\s*(?:→|->|=>)\s*/g, " para ").replace(/[≈~]\s?(?=\d)/g, "cerca de ").replace(/\s+&\s+/g, " e ")
+    .replace(/(^|\s)(?:p\.\s?ex\.|e\.g\.|ex\.?:|ex\.(?=\s))/gi, "$1por exemplo").replace(/(^|\s)i\.e\./gi, "$1isto é").replace(/\bobs\.:?/gi, "observação:")
+    .replace(/\baprox\./gi, "aproximadamente").replace(/\bqtde?\./gi, "quantidade").replace(/\bmáx\./gi, "máximo").replace(/\bmín\./gi, "mínimo")
+    .replace(/\bpágs\./gi, "páginas").replace(/\bpág\./gi, "página").replace(/\btel\./gi, "telefone").replace(/\bdepto?\./gi, "departamento");
+}
+
+// ---------- Pronúncia na voz pt-BR ----------
+// A voz pt-BR (Piper com espeak-ng) lê tudo com regras do português: "download" sai "dov-nlo-adi", "API" sai "ápi" e "PDF" vira
+// uma palavra. A frase em português continua na voz pt (trocar de voz no meio da frase soa pior), então o termo em inglês é
+// reescrito como um brasileiro o pronuncia, e as siglas são soletradas com o nome das letras em português. O prompt do modo voz
+// (spokenRule em rag.ts) já pede palavras em português; isto cobre o que sobra. Para incluir um termo: chave em minúsculas
+// (espaço ou hífen opcionais), grafia com acento na sílaba tônica. Plural com "s" é tratado sozinho.
+const EN_WORDS: Record<string, string> = {
+  software: "sóftuer", hardware: "rárduer", download: "dáunloud", upload: "áploud", backup: "bécape", email: "imêiu", "e-mail": "imêiu",
+  online: "onláine", offline: "ofláine", login: "lóguin", logout: "logáute", site: "sáite", website: "uebsáite", link: "línque", web: "uéb",
+  app: "ép", mouse: "máuse", notebook: "noutbúque", laptop: "léptop", feedback: "fídbeque", deadline: "dédláine", meeting: "mítim",
+  workshop: "uorquichópi", dashboard: "déchbord", framework: "frêimuork", cloud: "cláud", server: "sérver", update: "apdêite",
+  upgrade: "apgrêide", bug: "bâgue", chat: "tchét", chatbot: "tchetbót", prompt: "prômpt", startup: "startápi", marketing: "márquetim",
+  design: "dizáin", designer: "dizáiner", layout: "leiáute", feature: "fítcher", release: "rilíz", deploy: "diplói", token: "tôquen",
+  password: "péssuord", username: "iúzernêim", default: "difáut", input: "ínput", output: "áutput", setup: "setápi", checklist: "tchequelíst",
+  "check-in": "tchequín", "home office": "rôum ófis", office: "ófis", performance: "perfórmance", streaming: "strímim", smartphone: "smartfône",
+  "wi-fi": "uaifái", bluetooth: "blutúf", browser: "bráuzer", firewall: "fáiruól", workflow: "uórkflou", pipeline: "paipláine",
+  benchmark: "bêntchmark", compliance: "complaiânce", stakeholder: "isteiquiôlder", budget: "bâdjet", business: "bíznes", team: "tím",
+  manager: "ménajer", coach: "côutch", "know-how": "nôu ráu", "follow-up": "folouápi", "machine learning": "machín lérnim",
+  "big data": "big dêita", dataset: "dêitasét", "data center": "dêita sênter", script: "iscrípt", plugin: "plâguin", "pen drive": "pen dráive",
+  scanner: "iscâner", hacker: "ráquer", code: "côudi", ok: "okêi", excel: "écsel", word: "uórd", powerpoint: "páuer póint", outlook: "áutluk",
+  sharepoint: "xérpóint", onedrive: "uândráiv", teams: "tíms", windows: "uíndous", microsoft: "maicrosóft", google: "gúgol",
+  youtube: "iutúbi", whatsapp: "uatsápi", iphone: "aifône", linkedin: "linquedín", docker: "dóquer", python: "páiton",
+  javascript: "javascrípt", ollama: "olâma",
+};
+const enKey = (s: string) => s.toLowerCase().replace(/[\s-]+/g, "");
+const EN_MAP = new Map(Object.entries(EN_WORDS).map(([k, v]) => [enKey(k), v]));
+const EN_RE = new RegExp(`(?<![\\p{L}\\p{N}-])(${Object.keys(EN_WORDS).sort((a, b) => b.length - a.length).map(k => k.replace(/[\s-]+/g, "[\\s-]?")).join("|")})(s?)(?![\\p{L}\\p{N}-])`, "giu");
+const LETTERS: Record<string, string> = { A: "á", B: "bê", C: "cê", D: "dê", E: "é", F: "éfe", G: "gê", H: "agá", I: "í", J: "jóta", K: "cá", L: "éle", M: "ême",
+  N: "êne", O: "ó", P: "pê", Q: "quê", R: "érre", S: "ésse", T: "tê", U: "ú", V: "vê", W: "dáblio", X: "xis", Y: "ípsilon", Z: "zê" };
+const spell = (s: string) => [...s].map(c => LETTERS[c] ?? c).join(" ");
+// Siglas com vogal que a voz leria como palavra ("API" -> "ápi"); as sem vogal (PDF, CNPJ, HTML) são soletradas pela regra geral.
+const ACRONYMS: Record<string, string> = { JSON: "djêisson", ISO: "ízo", OK: "okêi" };
+for (const s of ["API", "URL", "ID", "IP", "USB", "CPU", "GPU", "TI", "IA", "UX", "UI", "EPI", "KPI", "ERP", "OKR", "SLA", "SAP", "OAB", "INSS", "IPTU", "IPVA", "ICMS", "IOF"]) // SUS, ONG e CEP se falam como palavra
+  ACRONYMS[s] = spell(s);
+export function pronouncePt(text: string) {
+  return text
+    .replace(/(?<![\p{L}\p{N}])([A-Z]{2,6})(s?)(?![\p{L}\p{N}])/gu, (m, s: string, pl: string) => {
+      const said = ACRONYMS[s] ?? (!/[AEIOUY]/.test(s) && !/^[MDCLXV]+$/.test(s) ? spell(s) : ""); // algarismo romano (século XX) fica como está
+      return said ? `${said}${pl}` : m;
+    })
+    .replace(EN_RE, (m, w: string, pl: string) => { const v = EN_MAP.get(enKey(w)); return v ? `${v}${pl}` : m; });
 }
 // Idioma da resposta (só pt/en): decide a voz. Sem sinal claro, português.
 export function detectLang(text: string): "pt" | "en" {
@@ -229,7 +326,7 @@ const wav = (samples: Float32Array, rate: number) => {
   return b;
 };
 export async function speak(text: string, opts: { voice?: string; voiceEn?: string; speed?: number; context?: string; signal?: AbortSignal } = {}) {
-  const lang = detectLang(`${opts.context || ""} ${text}`), clean = speechText(text), spoken = lang === "pt" ? normalizePt(clean) : clean;
+  const lang = detectLang(`${opts.context || ""} ${text}`), clean = speechText(text), spoken = lang === "pt" ? pronouncePt(normalizePt(clean)) : clean;
   if (!/[\p{L}\p{N}]/u.test(spoken)) return null;
   const key = pickVoice(lang === "pt" ? opts.voice : opts.voiceEn, lang), tts = await getTts(key);
   const speed = Math.min(1.5, Math.max(0.7, Number(opts.speed) || 1));
@@ -261,10 +358,24 @@ export function voiceRouter() {
     const started = Date.now();
     try {
       const raw = await transcribe(new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length)));
-      const nb = String(req.query.notebook || ""), text = raw && nb ? fixCodes(raw, notebookCodes(nb)) : raw;
+      const nb = String(req.query.notebook || ""), text = raw && nb ? fixTerms(fixCodes(raw, notebookCodes(nb)), notebookTerms(nb)) : raw;
       res.json({ text, raw, ms: Date.now() - started });
     }
     catch (e) { res.status(500).json({ error: e instanceof Error ? e.message : String(e) }); }
+  });
+  // Falas revisadas pelo usuário (opcional, desligado por padrão na tela): áudio + texto corrigido ficam só em VOICE_DIR/samples,
+  // no formato que `scripts/stt-bench.mts --dir` lê, para medir e ajustar o reconhecimento com a voz e o microfone reais.
+  r.post("/samples", express.raw({ type: "application/octet-stream", limit: "4mb" }), async (req, res) => {
+    const buf = req.body as Buffer, text = decodeURIComponent(String(req.get("x-text") || "")).trim().slice(0, 5000), raw = decodeURIComponent(String(req.get("x-raw") || "")).slice(0, 5000);
+    if (!Buffer.isBuffer(buf) || buf.length % 2 || buf.length < 3200 || !text) return res.status(400).json({ error: "Envie áudio PCM 16 bits, 16 kHz, mono, e o texto." });
+    try {
+      const dir = path.join(voiceDir, "samples"), name = new Date().toISOString().replace(/[:.]/g, "-"), pcm = new Int16Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.length));
+      await fsp.mkdir(dir, { recursive: true });
+      await fsp.writeFile(path.join(dir, `${name}.wav`), wav(Float32Array.from(pcm, v => v / 32768), 16000));
+      await fsp.writeFile(path.join(dir, `${name}.txt`), text);
+      await fsp.writeFile(path.join(dir, `${name}.json`), JSON.stringify({ raw, text, model: sttKey }));
+      res.status(201).json({ ok: true });
+    } catch (e) { res.status(500).json({ error: e instanceof Error ? e.message : String(e) }); }
   });
   r.post("/speak", async (req, res) => {
     const text = String(req.body?.text || "").slice(0, 2000);

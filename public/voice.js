@@ -1,12 +1,14 @@
 // Modo de voz: conversa falada com o notebook aberto, em tela cheia (HUD animado).
 // Fluxo: microfone -> detecção de fala (VAD por energia, no navegador) -> /api/voice/transcribe (STT local)
-// -> mesma rota do chat (/api/conversations/:id/messages?stream=1, RAG inalterado; a conversa fica salva)
+// -> mesma rota do chat (/api/conversations/:id/messages?stream=1, mesma busca; `spoken` pede ao modelo texto feito para ouvir; a conversa fica salva)
 // -> resposta falada frase a frase enquanto o modelo ainda escreve (/api/voice/speak, TTS local) -> volta a ouvir.
 // Usa `conversation`, `detailMode`, `loadMessages`, `loadChats`, `renderMarkdown` e `icons` de app.js.
 (() => {
   const PREF_KEY = 'bento-voice', GREETINGS = ['Às suas ordens.', 'Estou ouvindo.', 'Pois não?', 'Em que posso ajudar?'];
-  const prefs = { voice: 'faber', voiceEn: 'alan', speed: 1, fx: 'jarvis', pause: 1000, bargeIn: false, greet: true, review: false, filter: true };
-  try { Object.assign(prefs, JSON.parse(localStorage.getItem(PREF_KEY) || '{}')) } catch {}
+  // filter (supressão de ruído do navegador) desligado por padrão: em fala real (FLEURS) com ruído, removedores de ruído antes do
+  // STT pioraram ou empataram (GTCRN 12,7% -> 20,4% de erro; DPDFNet igual e 4x mais lento); o Parakeet já é treinado com ruído.
+  const prefs = { v: 2, voice: 'faber', voiceEn: 'alan', speed: 1, fx: 'jarvis', pause: 1000, bargeIn: false, wake: true, greet: true, review: false, filter: false, keep: false };
+  try { const saved = JSON.parse(localStorage.getItem(PREF_KEY) || '{}'); if ((saved.v || 1) < 2) delete saved.filter; Object.assign(prefs, saved, { v: 2 }) } catch {}
   const savePrefs = () => { try { localStorage.setItem(PREF_KEY, JSON.stringify(prefs)) } catch {} };
   const LABEL = { review: 'Confira o texto', boot: 'Iniciando', listening: 'Ouvindo', hearing: 'Ouvindo você', transcribing: 'Entendendo', thinking: 'Pensando', speaking: 'Falando', muted: 'Microfone pausado', error: 'Atenção' };
   const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -15,6 +17,8 @@
   let turn = null, progress = 0, levelSm = 0, rot = 0, lastT = 0;
   // VAD: piso de ruído adaptativo, pré-gravação (para não cortar o início da fala) e silêncio final configurável.
   let deafUntil = 0, noise = 0.004, loud = 0, inSpeech = false, frames = [], pre = [], preMs = 0, speechMs = 0, silentMs = 0, bargeMs = 0;
+  // Palavra de ativação enquanto a IA fala/pensa: só um trecho curto de fala é transcrito e só o chamado ("Ok Bento") interrompe.
+  let wakeIn = false, wakeFr = [], wakeLoud = 0, wakeMs = 0, wakeSil = 0, wakeBusy = false, wakeCool = 0;
 
   // ---------- Interface ----------
   const css = `
@@ -49,7 +53,9 @@
         <label class="block"><span class="mb-1 block text-white/70">Efeito da voz</span><select id="vFx" class="v-field"><option value="jarvis">Jarvis (eco metálico)</option><option value="sutil">Sutil (ambiente)</option><option value="natural">Natural</option></select></label>
         <label class="block"><span class="mb-1 block text-white/70">Enviar após uma pausa de</span><select id="vPause" class="v-field"><option value="600">0,6 s (ágil)</option><option value="800">0,8 s</option><option value="1000">1 s (recomendado)</option><option value="1400">1,4 s (pausado)</option><option value="2000">2 s (para pensar)</option></select></label>
         <label class="flex items-start gap-2 text-white/80"><input id="vReview" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Revisar o texto antes de enviar <span class="block text-xs text-white/50">Corrija o que foi entendido; Enter envia.</span></span></label>
-        <label class="flex items-start gap-2 text-white/80"><input id="vFilter" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Filtro de ruído do navegador <span class="block text-xs text-white/50">Desligue se palavras sumirem; ligue em ambiente barulhento.</span></span></label>
+        <label class="flex items-start gap-2 text-white/80"><input id="vKeep" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Guardar falas revisadas para medir o reconhecimento <span class="block text-xs text-white/50">Com a revisão ligada, o áudio e o texto que você corrigiu ficam só no servidor do Bento (pasta voice/samples).</span></span></label>
+        <label class="flex items-start gap-2 text-white/80"><input id="vFilter" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Filtro de ruído do navegador <span class="block text-xs text-white/50">Desligado reconhece melhor na maioria dos casos; ligue só se o fundo for muito barulhento e o resultado melhorar.</span></span></label>
+        <label class="flex items-start gap-2 text-white/80"><input id="vWake" type="checkbox" class="mt-0.5 h-4 w-4"> <span>Chamar pelo nome para interromper <span class="block text-xs text-white/50">Diga “Ok Bento”, “Oi Bento” ou “Bento” enquanto ele fala: ele para e passa a ouvir. Sem o chamado, nada interrompe. Com fone funciona melhor.</span></span></label>
         <label class="flex items-center gap-2 text-white/80"><input id="vBarge" type="checkbox" class="h-4 w-4"> Interromper quando eu falar <span class="text-xs text-white/50">(use fone)</span></label>
         <label class="flex items-center gap-2 text-white/80"><input id="vGreet" type="checkbox" class="h-4 w-4"> Saudação ao abrir</label>
         <p class="border-t border-white/10 pt-3 text-xs text-white/50">Tudo roda no servidor do Bento: <span id="vEngine"></span>. Respostas rápidas/detalhadas seguem o botão do chat.</p>
@@ -85,8 +91,8 @@
     root.addEventListener('pointerdown', e => { if (!q('#vSettings').classList.contains('hidden') && !e.target.closest('#vSettings,#vSettingsBtn')) setPanel(false) });
     const bind = (id, key, parse = v => v, after) => { const e = q(id); e.onchange = e.oninput = () => { prefs[key] = e.type === 'checkbox' ? e.checked : parse(e.value); savePrefs(); after?.() } };
     bind('#vVoice', 'voice', String, warmVoices); bind('#vVoiceEn', 'voiceEn', String, warmVoices); bind('#vSpeed', 'speed', Number, paintPrefs);
-    bind('#vFx', 'fx', String, applyFx); bind('#vPause', 'pause', Number); bind('#vBarge', 'bargeIn'); bind('#vGreet', 'greet');
-    bind('#vReview', 'review'); bind('#vFilter', 'filter', undefined, restartMic);
+    bind('#vFx', 'fx', String, applyFx); bind('#vPause', 'pause', Number); bind('#vBarge', 'bargeIn'); bind('#vWake', 'wake', undefined, resetVad); bind('#vGreet', 'greet');
+    bind('#vReview', 'review'); bind('#vKeep', 'keep'); bind('#vFilter', 'filter', undefined, restartMic);
     q('#vReplay').onclick = q('#vReplay2').onclick = replay;
     q('#vReviewSend').onclick = sendReview; q('#vReviewRedo').onclick = () => { hideReview(); setState('listening') };
     q('#vReviewText').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendReview() } });
@@ -104,21 +110,29 @@
   const $q = s => root.querySelector(s);
   function paintPrefs() {
     $q('#vVoice').value = prefs.voice; $q('#vVoiceEn').value = prefs.voiceEn; $q('#vSpeed').value = prefs.speed; $q('#vSpeedVal').textContent = `${Number(prefs.speed).toFixed(2).replace('.', ',')}x`;
-    $q('#vFx').value = prefs.fx; $q('#vPause').value = String(prefs.pause); $q('#vBarge').checked = !!prefs.bargeIn; $q('#vGreet').checked = !!prefs.greet;
-    $q('#vReview').checked = !!prefs.review; $q('#vFilter').checked = !!prefs.filter;
+    $q('#vFx').value = prefs.fx; $q('#vPause').value = String(prefs.pause); $q('#vBarge').checked = !!prefs.bargeIn; $q('#vWake').checked = !!prefs.wake; $q('#vGreet').checked = !!prefs.greet;
+    $q('#vReview').checked = !!prefs.review; $q('#vKeep').checked = !!prefs.keep; $q('#vFilter').checked = !!prefs.filter;
   }
   function setState(s, hint) {
     state = s; $q('#vState').textContent = LABEL[s] || '';
-    $q('#vHint').textContent = hint ?? ({ listening: 'Fale quando quiser · Espaço interrompe · Esc fecha', hearing: 'Pause para enviar · Espaço envia agora', thinking: 'Buscando nos documentos…', speaking: 'Espaço interrompe', muted: 'Pressione M ou o botão do microfone para voltar a ouvir' }[s] || '');
+    $q('#vHint').textContent = hint ?? ({ listening: 'Fale quando quiser · Espaço interrompe · Esc fecha', hearing: 'Pause para enviar · Espaço envia agora', thinking: 'Buscando nos documentos…', speaking: prefs.wake ? 'Diga “Ok Bento” ou aperte Espaço para interromper' : 'Espaço interrompe', muted: 'Pressione M ou o botão do microfone para voltar a ouvir' }[s] || '');
     const main = $q('#vMain'), label = { hearing: ['send', 'Enviar agora'], transcribing: ['square', 'Cancelar'], thinking: ['square', 'Interromper'], speaking: ['square', 'Interromper'], muted: ['mic', 'Voltar a ouvir'], error: ['rotate-ccw', 'Tentar de novo'] }[s];
     main.classList.toggle('invisible', !label);
     if (label) { main.innerHTML = `<i data-lucide="${label[0]}" class="h-4 w-4"></i><span>${label[1]}</span>`; icons() }
   }
   const showUser = text => { $q('#vUser').textContent = text ? `“${text}”` : ''; const r = $q('#vUserRow'); r.classList.toggle('hidden', !text); r.classList.toggle('flex', !!text); $q('#vReplay').classList.toggle('hidden', !lastCapture) };
   // Revisão: mostra o texto entendido para corrigir antes de perguntar (opcional).
-  function showReview(text) { showUser(''); const box = $q('#vReviewBox'), ta = $q('#vReviewText'); box.classList.remove('hidden'); ta.value = text; setState('review', 'Enter envia · Esc descarta'); ta.focus(); ta.setSelectionRange(text.length, text.length) }
+  let reviewRaw = '';
+  // Guarda o par áudio + texto corrigido (gabarito real para scripts/stt-bench.mts). Falha aqui nunca atrapalha a pergunta.
+  function keepSample(text) {
+    if (!prefs.keep || !lastCapture || !text) return;
+    const pcm = Int16Array.from(lastCapture, v => Math.round(Math.max(-1, Math.min(1, v)) * 32767));
+    fetch('/api/voice/samples', { method: 'POST', headers: { 'content-type': 'application/octet-stream', 'x-text': encodeURIComponent(text), 'x-raw': encodeURIComponent(reviewRaw) }, body: pcm.buffer }).catch(() => {});
+  }
+  function showReview(text) { reviewRaw = text; showUser(''); const box = $q('#vReviewBox'), ta = $q('#vReviewText'); box.classList.remove('hidden'); ta.value = text; setState('review', 'Enter envia · Esc descarta'); ta.focus(); ta.setSelectionRange(text.length, text.length) }
   function hideReview() { $q('#vReviewBox').classList.add('hidden') }
-  function sendReview() { const text = $q('#vReviewText').value.trim(); hideReview(); if (!text) return setState('listening'); turn = { ctrl: new AbortController(), queue: [], text: '', cursor: 0, buf: '', final: false, first: true, playing: false, src: null }; ask(text, turn); $q('#vMain').focus() }
+  function send(text) { turn = { ctrl: new AbortController(), queue: [], text: '', cursor: 0, buf: '', final: false, first: true, playing: false, src: null }; ask(text, turn) }
+  function sendReview() { const text = $q('#vReviewText').value.trim(); hideReview(); if (!text) return setState('listening'); keepSample(text); send(text); $q('#vMain').focus() }
   // Toca o áudio exatamente como foi enviado para a transcrição: mostra se o problema é o microfone/corte ou o modelo.
   function replay() { if (!ctx || !lastCapture) return; const b = ctx.createBuffer(1, lastCapture.length, 16000); b.copyToChannel(lastCapture, 0); const s = ctx.createBufferSource(); s.buffer = b; s.connect(ctx.destination); s.start(); deafUntil = performance.now() + b.duration * 1000 + 400; resetVad() }
   let paintQueued = false;
@@ -251,7 +265,7 @@
   }
 
   // ---------- Detecção de fala ----------
-  function resetVad() { inSpeech = false; loud = 0; frames = []; pre = []; preMs = 0; speechMs = 0; silentMs = 0; bargeMs = 0 }
+  function resetVad() { inSpeech = false; loud = 0; frames = []; pre = []; preMs = 0; speechMs = 0; silentMs = 0; bargeMs = 0; wakeIn = false; wakeFr = []; wakeLoud = 0; wakeMs = 0; wakeSil = 0 }
   function onFrame(f) {
     if (!ctx || muted || performance.now() < deafUntil) return;
     let sum = 0; for (let i = 0; i < f.length; i++) sum += f[i] * f[i];
@@ -263,6 +277,36 @@
       // Interromper falando: limiar bem mais alto para não confundir o eco da própria voz com o usuário.
       if (rms > Math.max(noise * 8, 0.06)) { bargeMs += ms; if (bargeMs > 220) { interrupt(); startSpeech(bargeMs) } } else bargeMs = Math.max(0, bargeMs - ms);
     }
+    else if (prefs.wake && (state === 'speaking' || state === 'thinking')) wakeFrame(f, rms, ms);
+  }
+  // Recorta um trecho curto de fala (até 5 s), manda à transcrição e só interrompe se começar com o chamado.
+  // Um pedido por vez; sem o chamado (conversa ao redor, eco) a resposta continua sem parar.
+  function wakeFrame(f, rms, ms) {
+    if (wakeBusy || performance.now() < wakeCool) { wakeIn = false; wakeFr = []; wakeLoud = 0; return }
+    if (!wakeIn) {
+      if (rms > Math.max(noise * 5, 0.03)) { wakeLoud += ms; if (wakeLoud >= 120) { wakeIn = true; wakeFr = pre.slice(); wakeMs = wakeLoud; wakeSil = 0 } } else wakeLoud = Math.max(0, wakeLoud - ms);
+      return;
+    }
+    wakeFr.push(f); wakeMs += ms;
+    if (rms < Math.max(noise * 2.5, 0.012)) wakeSil += ms; else wakeSil = 0;
+    if (wakeSil < 450 && wakeMs <= 5000) return;
+    const fr = wakeFr, sr = ctx.sampleRate, long = wakeMs; wakeIn = false; wakeFr = []; wakeLoud = 0; wakeSil = 0;
+    if (long >= 300) checkWake(fr, sr);
+  }
+  async function checkWake(fr, sr) {
+    wakeBusy = true; const my = session;
+    try {
+      const r = await fetch('/api/voice/transcribe', { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: toPcm16(fr, sr, false) });
+      if (r.status === 401) return location.replace('/login.html');
+      const j = await r.json().catch(() => ({})), m = r.ok && my === session && (state === 'speaking' || state === 'thinking') ? window.bentoWake?.match(String(j.text || '')) : null;
+      if (m) wakeHeard(m.rest); else wakeCool = performance.now() + 600;
+    } catch { wakeCool = performance.now() + 2000 } finally { wakeBusy = false }
+  }
+  // Chamado ouvido: para a resposta e passa a ouvir; se a pergunta veio junto ("Ok Bento, explica melhor"), já a envia.
+  function wakeHeard(rest) {
+    interrupt(true); resetVad(); deafUntil = performance.now() + 300; earcon('ready');
+    if (rest && rest.split(/\s+/).length >= 2 && /[\p{L}\p{N}]{2,}/u.test(rest)) { if (prefs.review) showReview(rest); else send(rest) }
+    else setState(muted ? 'muted' : 'listening', 'Pode falar…');
   }
   function startSpeech(already) { inSpeech = true; frames = pre.slice(); speechMs = already; silentMs = 0; setState('hearing') }
   function vad(f, rms, ms) {
@@ -290,15 +334,15 @@
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw Error(j.error || `Erro ${r.status} na transcrição.`);
       if (my !== session || turn?.ctrl !== ctrl) return;
-      const text = String(j.text || '').trim();
-      if (!/[\p{L}\p{N}]{2,}/u.test(text)) { turn = null; return setState('listening', 'Não entendi. Pode repetir?') }
+      const raw = String(j.text || '').trim(), text = window.bentoWake?.stripCall(raw) ?? raw; // "Ok Bento, ..." no começo é chamado, não pergunta
+      if (!/[\p{L}\p{N}]{2,}/u.test(text)) { turn = null; return setState('listening', raw && !/[\p{L}\p{N}]{2,}/u.test(raw) ? 'Não entendi. Pode repetir?' : raw ? 'Pode falar…' : 'Não entendi. Pode repetir?') }
       if (prefs.review) { turn = null; return showReview(text) }
       turn.transcribing = false; ask(text, turn);
     } catch (e) { if (!ctrl.signal.aborted && my === session) { turn = null; setState('listening', e.message || String(e)); earcon('error') } }
   }
   // Junta os quadros, reamostra para 16 kHz (média por janela: nos testes, mesma precisão do reamostrador do sherpa),
   // normaliza o volume (fala baixa dobrava os erros) e converte para PCM 16 bits. Guarda o áudio para "ouvir minha fala".
-  function toPcm16(fr, rate) {
+  function toPcm16(fr, rate, save = true) {
     const total = fr.reduce((n, f) => n + f.length, 0), all = new Float32Array(total); let o = 0; for (const f of fr) { all.set(f, o); o += f.length }
     const ratio = rate / 16000, n = Math.floor(total / ratio), mono = new Float32Array(n);
     for (let i = 0; i < n; i++) { const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.floor((i + 1) * ratio)); let s = 0; for (let k = a; k < b; k++) s += all[k]; mono[i] = s / (b - a) }
@@ -306,7 +350,7 @@
     const abs = Float32Array.from(mono, Math.abs).sort(), peak = abs[Math.floor(abs.length * 0.999)] || 0, gain = peak > 1e-4 ? Math.min(10, Math.max(1, 0.5 / peak)) : 1;
     const out = new Int16Array(n);
     for (let i = 0; i < n; i++) { const v = Math.max(-1, Math.min(1, mono[i] * gain)); mono[i] = v; out[i] = Math.round(v * 32767) }
-    lastCapture = mono;
+    if (save) lastCapture = mono;
     return out.buffer;
   }
 
@@ -316,7 +360,7 @@
   async function ask(content, t) {
     setState('thinking'); showUser(content); $q('#vAnswer').innerHTML = '';
     try {
-      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode, conversational: typeof chatMode !== 'undefined' && chatMode, documentIds: typeof focus !== 'undefined' && focus.size ? [...focus] : undefined }), signal: t.ctrl.signal });
+      const res = await fetch(`/api/conversations/${conversation}/messages?stream=1`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content, detailed: typeof detailMode !== 'undefined' && detailMode, creative: typeof creativeMode !== 'undefined' && creativeMode, conversational: typeof chatMode !== 'undefined' && chatMode, spoken: true, documentIds: typeof focus !== 'undefined' && focus.size ? [...focus] : undefined }), signal: t.ctrl.signal });
       if (res.status === 401) return location.replace('/login.html');
       if (!res.ok) { const d = await res.json().catch(() => ({})); throw Error(d.error || `Erro ${res.status}`) }
       used = true;

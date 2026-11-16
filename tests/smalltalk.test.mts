@@ -10,7 +10,7 @@ process.env.SQLITE_PATH = path.join(tmp, "test.sqlite");
 process.env.APP_DATA_DIR = tmp;
 process.env.UPLOAD_DIR = path.join(tmp, "uploads");
 const { conversationRoute, withoutSmallTalk } = await import("../src/smalltalk.js");
-const { buildDirectPrompt, resolveFollowUp } = await import("../src/rag.js");
+const { buildDirectPrompt, spokenRule, resolveFollowUp } = await import("../src/rag.js");
 
 const kind = (m: string, h: { role: string; content: string }[] = []) => conversationRoute(m, h).kind;
 
@@ -59,4 +59,12 @@ test("prompt da conversa direta: breve, sabe do que trata o notebook e não inve
   // Busca sem trecho: conversa normalmente e diz que não encontrou se pediram algo dos documentos.
   const searched = buildDirectPrompt("Manutenção", [], true);
   assert.match(searched, /não encontrou isso neles/); assert.doesNotMatch(searched, /Esta mensagem é conversa/);
+  // Modo de voz: pede texto falável; o chat escrito não recebe a regra.
+  assert.match(buildDirectPrompt("Manutenção", [], false, true), /lida em voz alta/); assert.doesNotMatch(p, /voz alta/);
+});
+
+test("regra do modo voz: texto corrido, sem jargão e em português; versão curta para modelos pequenos", () => {
+  const full = spokenRule(false), short = spokenRule(true);
+  for (const r of [full, short]) { assert.match(r, /voz alta/); assert.match(r, /sem listas|nada de listas/); assert.match(r, /português/); }
+  assert.match(full, /download/); assert.ok(short.length < full.length / 2);
 });
