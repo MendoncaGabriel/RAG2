@@ -222,8 +222,8 @@ async function startupChecks(){
   void prepareReranker();
   for(let i=0;!(await qdrant.ready());i++){ if(i%10===0)console.warn(`[Qdrant] aguardando ${config.qdrant.url}…`); await new Promise(r=>setTimeout(r,2_000)); }
   console.info(`[Qdrant] conectado a ${config.qdrant.url} (versão ${await qdrant.version()}), collection "${config.qdrant.collection}".`);
-  const o=await ollamaStatus();
-  if(o.ok)console.info(`[Ollama] ${o.baseUrl} acessível; modelos disponíveis: ${o.models?.join(", ")}.`); else console.error(`[Ollama] ${o.error}`);
+  // Sem esperar: Ollama fora do ar não atrasa a reconciliação.
+  void ollamaStatus().then(o=>{ if(o.ok)console.info(`[Ollama] ${o.baseUrl} acessível; modelos disponíveis: ${o.models?.join(", ")}.`); else console.error(`[Ollama] ${o.error}`); });
   for(let delay=5_000;;delay=Math.min(delay*2,300_000)){
     const r=await reconcile();
     if(r.ok){ console.info(`[Sync] ${r.skipped?`ignorada: ${r.skipped}`:`ok · órfãos removidos ${r.orphanDocuments} doc(s)/${r.orphanPoints} ponto(s) · reparados ${r.repairedDocuments.length} · retomados ${r.resumedDocuments.length} · exclusões pendentes ${r.deferredDeletions} · incompatíveis ${r.incompatibleDocuments}`}`); break; }
@@ -235,5 +235,5 @@ async function startupChecks(){
 }
 // Depois de abrir a porta (em segundo plano): mede o PC e pré-carrega os modelos (tuning.ts). A medição só acontece na 1ª vez por PC/modelo.
 app.listen(port,()=>{console.log(`Bento disponível em http://localhost:${port}`);void startupChecks().catch(e=>console.error("[Inicialização]",e));});
-// A medição pode levar minutos em CPUs lentas: roda em segundo plano, sem impedir o acesso à interface.
-void runTuning().catch(e=>console.warn("[Ajuste] falhou:",e));
+// Na inicialização só usa o ajuste salvo e pré-carrega os modelos (sem medir: a medição levava minutos); medir de novo só em "Testar desempenho".
+void runTuning(false,false,undefined,true).catch(e=>console.warn("[Ajuste] falhou:",e));

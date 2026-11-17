@@ -180,14 +180,14 @@ const isLocal = (url: string) => /^https?:\/\/(localhost|127\.|\[?::1\]?|0\.0\.0
 // Uma medição por vez: chamadas simultâneas (inicialização, salvar ajustes, configuração automática, botão de teste) esperam a que já está rodando.
 // Medições paralelas travavam o Ollama (fila de chat + embeddings sem resposta, indexação sem andar).
 let tuning: Promise<TuneResult | null> | null = null;
-export function autoTune(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
+export function autoTune(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; noMeasure?: boolean; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
   if (tuning) return tuning;
   status = { running: true, forced: !!opts.force || !!opts.full, device: opts.devices?.[0] ?? getAiTuning().device, queue: opts.devices?.length ? opts.devices : [getAiTuning().device], model: t?.chatModel || "", startedAt: new Date().toISOString(), planned: 0, samples: [], error: null, finishedAt: null };
   return tuning = autoTuneNow(t, opts)
     .catch(e => { status.error = e instanceof Error ? e.message : String(e); throw e; })
     .finally(() => { status.running = false; status.finishedAt = new Date().toISOString(); tuning = null; });
 }
-async function autoTuneNow(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
+async function autoTuneNow(t: TuneTarget | null, opts: { force?: boolean; full?: boolean; devices?: DeviceMode[]; noMeasure?: boolean; log?: (m: string) => void } = {}): Promise<TuneResult | null> {
   const log = opts.log || ((m: string) => console.info(`[Ajuste] ${m}`));
   const t0 = Date.now();
   const hw = await detectHardware();
@@ -208,6 +208,7 @@ async function autoTuneNow(t: TuneTarget | null, opts: { force?: boolean; full?:
       if (mode === "ollama" && !opts.force) log("threads: o Ollama decide (Configurações); medição desligada.");
       else if (mode === "manual" && !opts.force) log(`threads: ${getAiTuning().threads} (manual, Configurações); sem medir.`);
       else if (cached && !opts.force && !opts.full) { if (req === inUse) current = cached; log(`usando ajuste salvo de ${cached.at.slice(0, 10)} (${label}): ${cached.numThread ? `${cached.numThread} threads` : "threads automáticas do Ollama"} (${cached.device}). Para medir de novo use "Testar desempenho" em Configurações.`); }
+      else if (opts.noMeasure && !cached) log(`sem ajuste salvo (${label}): medição não roda na inicialização, padrão do Ollama até usar "Testar desempenho" em Configurações.`);
       else {
         const res = await sweep(t, hw, key, log, opts.full, req, doneNow.cpu);
         doneNow[req] = res;

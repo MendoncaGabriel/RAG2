@@ -324,7 +324,7 @@ export async function tuningOverview() {
 // Busca (e guarda em cache) os metadados do modelo ativo; chamar antes de usar o perfil para que num_ctx fique estável entre as chamadas.
 // Mede o PC com o modelo ativo (inicialização, troca de IA, botão Testar desempenho). Pausa a indexação densa e o One page durante a medição,
 // senão o Ollama divide a CPU e os números saem errados.
-export const runTuning = (force = false, full = false, devices?: DeviceMode[]) => withQuestion(async () => autoTune(await tuneTarget(), { force, full, devices }));
+export const runTuning = (force = false, full = false, devices?: DeviceMode[], noMeasure = false) => withQuestion(async () => autoTune(await tuneTarget(), { force, full, devices, noMeasure }));
 export const prepareModel = () => refreshModelInfo(activeProvider("chat"));
 
 // O Ollama recarrega o modelo quando num_ctx muda entre chamadas; todas as chamadas de chat usam o mesmo valor para evitar esse custo.

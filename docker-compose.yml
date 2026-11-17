@@ -110,10 +110,10 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "${APP_BIND:-127.0.0.1}:${PORT:-3000}:3000"
+      - "${APP_BIND:-127.0.0.1}:${PORT:-3001}:3001"
     environment:
       <<: *app-env
-      PORT: 3000
+      PORT: 3001
       MASTER_USER: ${MASTER_USER:?defina MASTER_USER no .env}
       MASTER_PASSWORD: ${MASTER_PASSWORD:?defina MASTER_PASSWORD no .env}
       JWT_SECRET: ${JWT_SECRET:-}

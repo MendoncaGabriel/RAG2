@@ -159,11 +159,11 @@ async function http(label: string, url: string, init: { headers?: Record<string,
 // Lista de modelos instalados por servidor, em cache curto. Modelo ausente vira mensagem clara; nada é baixado automaticamente.
 const tagsCache = new Map<string, { at: number; models?: Set<string>; error?: string }>();
 const withTag = (m: string) => (m.includes(":") ? m : `${m}:latest`);
-async function installedModels(p: Provider, force = false): Promise<Set<string>> {
+async function installedModels(p: Provider, force = false, timeout = 8_000): Promise<Set<string>> {
   const hit = tagsCache.get(p.baseUrl);
   if (!force && hit && Date.now() - hit.at < (hit.models ? 60_000 : 5_000)) { if (hit.models) return hit.models; throw new Error(hit.error); }
   try {
-    const data = await jsonOrThrow("Ollama", await http("Ollama", `${p.baseUrl}/api/tags`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout: 8_000 }));
+    const data = await jsonOrThrow("Ollama", await http("Ollama", `${p.baseUrl}/api/tags`, { headers: p.apiKey ? { authorization: `Bearer ${p.apiKey}` } : {}, timeout }));
     const models = new Set<string>(((data.models || []) as any[]).map(m => withTag(String(m.name))));
     tagsCache.set(p.baseUrl, { at: Date.now(), models });
     return models;
@@ -183,8 +183,9 @@ export async function ollamaStatus(): Promise<{ ok: boolean; baseUrl?: string; m
   const p = activeProvider("chat") ?? activeProvider("embedding");
   if (!p) return { ok: false, error: "Nenhum servidor Ollama configurado." };
   try {
-    const models = await installedModels(p, true);
-    const need = [activeProvider("chat")?.chatModel, activeProvider("embedding")?.embeddingModel].filter((m): m is string => !!m);
+    // Lista fresca (Ollama aberto responde em ms), mas com espera curta e sem repetir a espera se a falha é recente (Ollama fora do ar).
+    const hit = tagsCache.get(p.baseUrl), models = await installedModels(p, !hit?.error || Date.now() - hit.at >= 5_000, 3_000);
+    const need =[activeProvider("chat")?.chatModel, activeProvider("embedding")?.embeddingModel].filter((m): m is string => !!m);
     const missing = need.filter(m => !models.has(withTag(m)));
     return { ok: !missing.length, baseUrl: p.baseUrl, models: need, ...(missing.length ? { error: `Modelos ausentes no Ollama: ${missing.join(", ")} (no Windows: ollama pull <modelo>).` } : {}) };
   } catch (e) { return { ok: false, baseUrl: p.baseUrl, error: e instanceof Error ? e.message : String(e) }; }
