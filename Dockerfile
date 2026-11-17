@@ -1,4 +1,5 @@
-# syntax=docker/dockerfile:1
+# Sem a diretiva "# syntax=docker/dockerfile:1" de propósito: ela força baixar a imagem docker/dockerfile do Docker Hub
+# a cada build, e o proxy corporativo derruba essa consulta (i/o timeout). Nada aqui precisa de recursos além do Dockerfile padrão.
 # Estágios: deps (dependências completas) → build (tsc) → test (testes via compose --profile test) → runtime (produção).
 FROM node:22.23.3-bookworm-slim AS deps
 # onnxruntime-node (reranker) baixaria as bibliotecas CUDA no npm ci em linux/x64; o reranking roda em CPU.

@@ -12,32 +12,111 @@ Tudo roda por Docker Compose no WSL2; o único serviço fora dos containers é o
 
 ## Requisitos
 
-- Windows 11 com WSL2 (Ubuntu) e Docker Engine + Compose v2 dentro do WSL2.
-- Ollama instalado no Windows com os modelos configurados (`ollama pull qwen3:1.7b` e `ollama pull bge-m3`). O app **não** baixa modelos sozinho: se faltar algum, avisa qual.
-- Disco Linux (ext4 do WSL) para os volumes do Qdrant e do SQLite — veja [Volumes](#volumes).
+| Item | Detalhe |
+|---|---|
+| Sistema | Windows 11 (64 bits) com virtualização ligada na BIOS/UEFI, ou Linux nativo (veja a nota no passo 5) |
+| Memória | 16 GB de RAM recomendados (o app com reranker e voz usa ~1,5 GB, o Qdrant cresce com a base, e o Ollama carrega os modelos de chat e embeddings; com menos, use modelos menores) |
+| Disco | ~15 GB livres para imagens Docker, modelos do Ollama e modelos de voz/reranker; os volumes crescem com os documentos ([Capacidade e escala](#capacidade-e-escala)) |
+| Permissões | Administrador no Windows (WSL, Ollama e a ponte do passo 5) e `sudo` dentro do WSL |
+| Internet | Na instalação: Docker Hub (`registry-1.docker.io`), npm, GitHub, Hugging Face e o site do Ollama. Depois de instalado e com os modelos baixados, funciona offline |
+| Software | WSL2 com Ubuntu, Docker Engine + Compose v2 **dentro do WSL2** (não precisa do Docker Desktop), Ollama no Windows, Git |
 
-## Instalação e execução
+## Instalação e execução (máquina nova, passo a passo)
 
-1. **Ponte Ollama → WSL2 (uma vez, no Windows, PowerShell como Administrador):**
+Onde cada comando roda: **[Windows]** = PowerShell no Windows; **[Admin]** = PowerShell aberto com "Executar como administrador"; **[WSL]** = terminal do Ubuntu (digite `wsl` no PowerShell).
 
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File scripts\windows\ollama-wsl-bridge.ps1
-   ```
+### 1. Instalar o WSL2 com Ubuntu **[Admin]**
 
-   O Ollama continua escutando só em `127.0.0.1:11434`. O script cria um `portproxy` que escuta **apenas** no IP do Windows na interface virtual do WSL (ex.: `172.29.48.1`) e uma regra de firewall de entrada restrita a esse IP e à sub-rede do WSL — o Ollama não fica exposto ao Wi‑Fi/rede corporativa (não use `OLLAMA_HOST=0.0.0.0`). O script imprime a URL a usar em Configurações (ou use **Configurar automaticamente**). Se o WSL trocar de sub-rede (pode acontecer após reiniciar o Windows), rode o script de novo e atualize o `.env`; o app avisa no log e em `/healthz` quando não alcança o Ollama. `-Remove` desfaz a ponte.
+```powershell
+wsl --install -d Ubuntu      # reinicie o Windows se pedir; no 1º uso o Ubuntu pede usuário e senha
+wsl --set-default-version 2
+wsl -l -v                    # confira: Ubuntu, VERSION 2
+```
 
-   **Linux nativo (Fedora, Ubuntu…):** o Ollama escuta só em `127.0.0.1`, que o container não alcança. Rode `sudo bash scripts/linux/ollama-docker-bridge.sh` (faz o Ollama escutar no IP do `docker0`, ex.: `172.17.0.1`, sem expô-lo à rede; `--remove` desfaz). O Compose já mapeia `host.docker.internal` para o host.
+Crie (ou edite) `%UserProfile%\.wslconfig` **[Windows]** para o WSL não desligar sozinho quando fica ocioso (desligado, ele derruba os containers e o navegador mostra `ERR_CONNECTION_REFUSED`):
 
-2. **Configuração (no WSL2, na pasta do projeto):** `cp .env.example .env` e preencha `MASTER_PASSWORD`, `JWT_SECRET` (`openssl rand -hex 48`), e `QDRANT_API_KEY` (`openssl rand -hex 32`). **A IA não é configurada no `.env`:** depois de subir, abra **Configurações** na interface web e clique em **Configurar automaticamente** (ou cadastre o servidor manualmente; no WSL o IP do Windows sai de `ip route show default | awk '{print $3}'`).
+```ini
+[wsl2]
+vmIdleTimeout=-1
+```
 
-3. **Subir / parar:**
+Se o PC tiver pouca RAM, limite também o WSL (ex.: `memory=12GB`). Aplique com `wsl --shutdown` e abra o WSL de novo.
 
-   ```bash
-   docker compose up -d --build     # http://localhost:3000 (também pelo navegador do Windows)
-   docker compose logs -f rag       # logs da aplicação
-   docker compose ps                # estado e healthchecks
-   docker compose down              # para; os dados ficam nos volumes
-   ```
+### 2. Instalar o Docker Engine no WSL2 **[WSL]**
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh        # instala Docker Engine, buildx e o plugin Compose v2
+sudo usermod -aG docker $USER                       # usar docker sem sudo
+printf '[boot]\nsystemd=true\n' | sudo tee /etc/wsl.conf   # só se ainda não existir; o Docker passa a subir sozinho
+exit                                                # depois, no Windows: wsl --shutdown, e abra o WSL de novo
+```
+
+Confira dentro do WSL: `docker version`, `docker compose version` e `docker run --rm hello-world`. Se o último falhar por tempo esgotado, o WSL está sem internet: veja [Solução de problemas](#solução-de-problemas) (VPN e proxy).
+
+### 3. Instalar o Ollama no Windows e baixar os modelos **[Windows]**
+
+Instale o Ollama em <https://ollama.com/download> e baixe os modelos (o app **nunca** baixa modelos sozinho; se faltar algum, ele avisa qual):
+
+```powershell
+ollama pull qwen3:1.7b     # chat (use outro modelo de chat se preferir; veja "Ajuste automático ao modelo local")
+ollama pull bge-m3         # embeddings
+ollama list                # confira
+```
+
+O Ollama deve ficar escutando só em `127.0.0.1:11434` (padrão). **Não** defina `OLLAMA_HOST=0.0.0.0`. Dicas de desempenho (`OLLAMA_MAX_LOADED_MODELS`, `OLLAMA_VULKAN`) estão em [Dica de desempenho do Ollama](#dica-de-desempenho-do-ollama).
+
+### 4. Obter o projeto **[WSL]**
+
+Clone **dentro do disco Linux do WSL** (ex.: `~/RAG2`), não em `/mnt/c`: Qdrant e SQLite não funcionam de forma confiável em pastas do Windows ([Volumes](#volumes)).
+
+```bash
+cd ~ && git clone <url-do-repositório> RAG2 && cd RAG2
+```
+
+Se o projeto precisar ficar em `/mnt/c/...` (ex.: foi clonado no Windows), tudo funciona desde que você aponte `VOLUMES_DIR` para uma pasta do Linux no passo 6 (ex.: `/home/<usuario>/rag-volumes`).
+
+### 5. Criar a ponte Ollama → WSL2 **[Admin]** (uma vez; repita se o IP do WSL mudar)
+
+Os containers não alcançam o `127.0.0.1` do Windows. Na pasta do projeto:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\ollama-wsl-bridge.ps1
+```
+
+O Ollama continua escutando só em `127.0.0.1:11434`. O script cria um `portproxy` que escuta **apenas** no IP do Windows na interface virtual do WSL (ex.: `172.29.48.1`) e uma regra de firewall de entrada restrita a esse IP e à sub-rede do WSL: o Ollama não fica exposto ao Wi‑Fi/rede corporativa. O script precisa do WSL em execução (a interface `vEthernet (WSL…)` só existe com ele ligado) e imprime a URL a usar em Configurações (ou use **Configurar automaticamente**). Se o WSL trocar de sub-rede (pode acontecer após reiniciar o Windows), rode o script de novo; o app avisa no log e em `/healthz` quando não alcança o Ollama. `-Remove` desfaz a ponte.
+
+**Linux nativo (Fedora, Ubuntu…):** não há WSL nem passos 1 e 5. Instale Docker e Ollama normalmente; como o Ollama escuta só em `127.0.0.1`, rode `sudo bash scripts/linux/ollama-docker-bridge.sh` (faz o Ollama escutar no IP do `docker0`, ex.: `172.17.0.1`, sem expô-lo à rede; `--remove` desfaz). O Compose já mapeia `host.docker.internal` para o host.
+
+### 6. Configurar o `.env` **[WSL]**
+
+```bash
+cp .env.example .env
+sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -hex 48)|; s|^QDRANT_API_KEY=.*|QDRANT_API_KEY=$(openssl rand -hex 32)|" .env
+nano .env     # troque MASTER_PASSWORD (o padrão admin123 é só de exemplo) e, se necessário, MASTER_USER
+```
+
+Obrigatórios (o app e o Compose recusam subir sem eles): `MASTER_USER`, `MASTER_PASSWORD`, `QDRANT_API_KEY`. Mantenha `PORT=3000` (sem ele o Compose publica a porta 3001). Se o projeto está em `/mnt/c`, descomente e ajuste `VOLUMES_DIR`. `APP_UID`/`APP_GID` devem ser o seu usuário no WSL (`id -u` e `id -g`; normalmente 1000). **A IA não é configurada no `.env`**, só na interface (passo 8). Nunca faça commit do `.env`.
+
+### 7. Subir **[WSL]**
+
+```bash
+docker compose up -d --build     # 1º build: 5 a 15 min (baixa imagens e dependências)
+docker compose ps                # qdrant e rag devem ficar "healthy"
+docker compose logs -f rag       # logs da aplicação
+```
+
+Abra <http://localhost:3000> (também no navegador do Windows) e entre com `MASTER_USER`/`MASTER_PASSWORD`. No 1º uso o app baixa do Hugging Face o reranker (~135 MB) e, ao abrir o modo de voz, os modelos de voz (~740 MB); até lá, a busca segue sem reranking e a voz mostra o progresso.
+
+Para parar: `docker compose down` (os dados ficam nos volumes). Para atualizar depois de um `git pull`: `docker compose up -d --build`.
+
+### 8. Configurar a IA e verificar
+
+1. Na interface, abra **Configurações** (engrenagem) e clique em **Configurar automaticamente**: ele acha o Ollama (localhost, IP do Windows visto pelo WSL2) e escolhe os modelos instalados. Se não achar, cadastre o servidor manualmente com a URL que o script do passo 5 imprimiu (ou `http://$(ip route show default | awk '{print $3}'):11434`, executado no WSL).
+2. Clique em **Testar**: faz uma chamada real a cada modelo e mostra o perfil detectado.
+3. Verifique `curl --noproxy '*' http://localhost:3000/healthz` **[WSL]** (SQLite, Qdrant e Ollama devem estar `ok`; 503 se algum falhar).
+4. Crie um notebook, envie um arquivo, aguarde `processed` e faça uma pergunta.
+
+Opcional: rode os testes ([Testes](#testes)) para validar a máquina.
 
 Na inicialização a aplicação valida as variáveis obrigatórias, espera o Qdrant, confere o Ollama do Windows e os modelos, cria a collection se não existir e reconcilia SQLite ↔ Qdrant. `GET /healthz` mostra o estado de SQLite, Qdrant e Ollama (503 se algum falhar).
 
@@ -59,6 +138,33 @@ Na inicialização a aplicação valida as variáveis obrigatórias, espera o Qd
 Importação em lote: a pasta `${IMPORT_DIR:-./import}` do host é montada **só leitura** em `/app/import`. Os arquivos dela são lidos onde estão (não são copiados para `app/`) e podem ficar em `/mnt/c`; só os bancos exigem ext4.
 
 Os dados sobrevivem a `docker compose down/up`, reinício do Docker/WSL e reconstrução da imagem. **Qdrant e SQLite (WAL) não funcionam de forma confiável em pastas do Windows montadas no WSL (`/mnt/c`, 9p)** — o próprio Qdrant não suporta esse tipo de sistema de arquivos. Se o projeto estiver em `/mnt/c/...`, defina `VOLUMES_DIR` no `.env` para uma pasta do Linux (ex.: `/home/<usuario>/rag-volumes`); com o projeto dentro do WSL (ex.: `~/RAG2`), o padrão `./volumes` serve. A aplicação avisa no log se o SQLite estiver numa montagem 9p/drvfs.
+
+## Solução de problemas
+
+| Sintoma | Causa e correção |
+|---|---|
+| `docker compose up --build` falha com `i/o timeout` em `registry-1.docker.io` (ou `docker run hello-world` não baixa), mas o navegador do Windows abre o Docker Hub | **O WSL2 está sem internet** (típico com **VPN corporativa**, como Cisco AnyConnect, que captura o tráfego do NAT do WSL). Teste no WSL: `ping -c1 8.8.8.8` e `curl -m 8 -sS -o /dev/null -w '%{http_code}\n' https://registry-1.docker.io/v2/` (o esperado é `401`). Se o ping falha mas o gateway responde, rode **no PowerShell como Administrador** os comandos abaixo, depois `wsl --shutdown` e tente de novo. Se voltar a falhar quando o VPN reconectar, repita os comandos, ou suba o Compose antes de conectar o VPN, ou use as imagens já baixadas |
+| `ERR_CONNECTION_REFUSED` em `localhost:3000` | O WSL desligou por ociosidade e levou os containers. Confira `vmIdleTimeout=-1` no `.wslconfig`; para reerguer: abra o WSL e rode `docker compose up -d`. Enquanto o WSL não tem janela aberta, mantenha-o vivo com `Start-Process wsl.exe -ArgumentList '-e','sleep','infinity' -WindowStyle Hidden` |
+| O app avisa que não alcança o Ollama (log, `/healthz`, "sem servidor") | (a) Ollama fechado no Windows; (b) a ponte não existe ou o IP do WSL mudou depois de reiniciar o Windows: rode de novo o script do passo 5 e use **Configurar automaticamente**; (c) VPN/antivírus bloqueando a regra de firewall "Ollama (somente WSL2)" |
+| Download de modelos (reranker, voz) falha com `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` | Proxy corporativo que reabre o TLS: o container não confia na CA da empresa. Opções: copie a pasta `app/` dos volumes de uma instalação que já baixou os modelos (contém `reranker/` e `voice/`); baixe no Windows (que confia na CA) e copie para `app/`; ou aponte `RERANK_HF_URL`/`VOICE_HF_URL` para um espelho interno do Hugging Face |
+| `docker pull`/`build` falha atrás de proxy HTTP | Configure o proxy do daemon: `sudo mkdir -p /etc/systemd/system/docker.service.d` e crie `http-proxy.conf` com `[Service]` e `Environment="HTTP_PROXY=http://proxy:porta"`, `Environment="HTTPS_PROXY=http://proxy:porta"`, `Environment="NO_PROXY=localhost,127.0.0.1"`; depois `sudo systemctl daemon-reload && sudo systemctl restart docker`. Se o proxy reabre o TLS, instale a CA da empresa no WSL (`.crt` em `/usr/local/share/ca-certificates/` + `sudo update-ca-certificates`) |
+| `npm ci` cai com `ECONNRESET` durante o build | Proxy derrubando o download. Não mude `package.json`/`package-lock.json` sem necessidade (isso invalida o cache da camada do `npm ci`). Sem acesso ao npm nessa rede, gere a imagem em outra máquina com `docker compose build` e leve com `docker save rag-local qdrant/qdrant:v1.19.2-unprivileged busybox:1.37.0 \| gzip > rag.tar.gz`; na máquina nova, `gunzip -c rag.tar.gz \| docker load` e `docker compose up -d` (sem `--build`) |
+| `curl localhost:3000` no WSL não responde, mas o navegador do Windows sim | `.wslconfig` com `autoProxy=true`: use `curl --noproxy '*' ...` |
+| Aviso de SQLite em montagem 9p/drvfs, Qdrant que não inicia ou banco corrompido | Volumes em `/mnt/c`. Defina `VOLUMES_DIR` para uma pasta do Linux (ex.: `/home/<usuario>/rag-volumes`) |
+| `defina QDRANT_API_KEY no .env` (ou `MASTER_PASSWORD`/`MASTER_USER`) | O `.env` não existe ou está incompleto: passo 6. Rode `docker compose` na pasta do projeto |
+| Sem permissão em `volumes/` | `APP_UID`/`APP_GID` do `.env` diferem do seu usuário (`id -u`, `id -g`) |
+| `permission denied` no socket do Docker | `sudo usermod -aG docker $USER`, `wsl --shutdown` e abra o WSL de novo |
+| O Compose não sobe depois de restaurar de um backup | Os dados ficam só em `VOLUMES_DIR` (`qdrant/`, `sqlite/`, `app/`); restaure as três pastas juntas, com o app parado |
+
+Comandos do VPN (**[Admin]**; o nome do adaptador é só um exemplo, confira com `Get-NetAdapter`):
+
+```powershell
+Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*AnyConnect*" } | Set-NetIPInterface -InterfaceMetric 6000
+Get-NetIPInterface -InterfaceAlias "vEthernet (WSL*" | Set-NetIPInterface -InterfaceMetric 1
+wsl --shutdown
+```
+
+Não adicione de volta a diretiva `# syntax=docker/dockerfile:1` no topo do [Dockerfile](Dockerfile): ela faz o Docker baixar a imagem `docker/dockerfile` do Docker Hub a cada build, o que falha em redes que bloqueiam essa consulta (nada no Dockerfile precisa dela).
 
 ## Arquitetura de recuperação
 
